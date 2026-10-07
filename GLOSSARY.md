@@ -15,6 +15,8 @@
 - **Inbox snapshot**: Telegram unread state for a user, local unprocessed updates for a bot.
 - **Checkpoint**: durable progress committed with the messages it covers.
 - **Delivery plan**: immutable preview of the identity, content, and exact recipients.
+- **Plan authorization**: trusted-client recording of an explicit human instruction
+  permitting only the previewed send and selected files; permanent grants stay unchanged.
 - **Job**: a persisted synchronization, export, or delivery operation.
 - **Unknown delivery**: a send may have succeeded; automatic replay is unsafe.
 - **Confirmed operation**: an exact external action described by an immutable

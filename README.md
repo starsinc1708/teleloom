@@ -97,6 +97,9 @@ Try this first:
 - Sending and other external changes require their own permissions and an
   immutable preview plus confirmation. An uncertain delivery is recorded as
   **unknown** and is never automatically resent.
+- An explicit human instruction to send to exact recipients can authorize that
+  previewed send and selected local files through `owner_authorized=true`. Permanent
+  allowlists and file roots stay unchanged. [Plan authorization](docs/reference.md#plan-authorization-from-explicit-owner-instructions).
 - Telegram credentials stay in the OS keyring or supplied environment. State and
   exports stay in your local data directory. Your chosen agent/model provider
   receives the evidence you request; optional external analysis is explicit.

@@ -18,8 +18,9 @@ from tests.test_transport import client, running
 @pytest.mark.parametrize(
     "kind", ["send_file", "send_album", "send_voice", "send_sticker", "send_gif"]
 )
+@pytest.mark.parametrize("owner_authorized", [False, True])
 async def test_bot_media_uses_real_aiogram_multipart_models_and_frozen_bytes(
-    tmp_path, monkeypatch, kind
+    tmp_path, monkeypatch, kind, owner_authorized
 ):
     from aiogram import Bot, methods
     from aiogram import types as bot_types
@@ -109,13 +110,23 @@ async def test_bot_media_uses_real_aiogram_multipart_models_and_frozen_bytes(
     settings = Settings(
         data_dir=tmp_path / "owner",
         profiles={
-            "helper": Profile(kind="bot", polling=False, send_chats=["100"], file_roots=[str(root)])
+            "helper": Profile(
+                kind="bot",
+                polling=False,
+                send_chats=[] if owner_authorized else ["100"],
+                file_roots=[] if owner_authorized else [str(root)],
+            )
         },
     )
     async with running(settings, make_adapter) as owner, client(owner, settings) as mcp:
         preview = data(
             await mcp.call_tool(
-                "media_operation_preview", {"profile_id": "helper", "operation": operation}
+                "media_operation_preview",
+                {
+                    "profile_id": "helper",
+                    "operation": operation,
+                    "owner_authorized": owner_authorized,
+                },
             )
         )
         assert preview["ok"], preview

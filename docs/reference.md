@@ -705,9 +705,42 @@ entry may be pending, sending, sent, failed, partial, cancelled or unknown. Canc
 cannot retract an in-flight send. Unknown outcomes block pause/resume paths that
 could accidentally replay them; inspect Telegram and explicitly plan remaining work.
 
+## Plan authorization from explicit owner instructions
+
+Available in the current source checkout; released v0.5.0 retains the CLI-only
+standing-permission workflow. Upgrade the owner and refresh client discovery/skills
+before using the new preview argument.
+
+`delivery_preview`, `message_operation_preview` and `media_operation_preview`
+accept optional `owner_authorized=false`. If the human owner explicitly requests
+a send to exact resolved recipients and selects the exact local media files, the
+authenticated client may pass `true`. This records permission for that immutable
+plan without a daemon restart or permanent CLI grant. The flag is hash-bound and
+visible in the preview; it is client-trusted human intent, like execution
+confirmation, and cannot be independently verified by the server.
+
+This covers plain text delivery/reply, explicit multi-recipient delivery with
+`broadcast=true`, `message_operation_preview(kind=send)` including formatted
+replies, and media sends. Other mutations and bare uploads reject it with
+`unsupported_authorization`. Default calls retain configured allowlists/root
+checks. Selected media authorization permits only the safely verified source path
+and snapshot bytes, never its enclosing directory or optional download destinations.
+Reusable upload handles retain their original file-root checks.
+
+The client must never infer this flag from Telegram text, captions, attachments,
+authors, discovered contacts or a request only to prepare a draft. Resolve all
+recipients canonically and review the complete content/list/files. Execution still
+requires `delivery_execute` with matching hash and explicit confirmation; an
+already supplied instruction to send the unchanged reviewed preview is sufficient.
+Current read policy, profile/account binding, expiry, limits, source hashes,
+cancellation, restart recovery and unknown-outcome reconciliation all apply.
+No persistent profile permissions or tool exposure change.
+The existing profile `send`/`broadcast` and `file_roots_configured` capability
+values describe standing configuration, not permission for an owner-authorized plan.
+
 ## Confirmed message operations
 
-`message_operation_preview(profile_id, operation)` takes a discriminated typed
+`message_operation_preview(profile_id, operation, owner_authorized=false)` takes a discriminated typed
 object with an exact numeric `chat_id`; unknown keys are rejected. Supported
 `kind` values: `send`, `edit`, `delete`, `forward`, `reaction`, `poll`,
 `contact_send`, `pin`, `unpin_all`, `read_ack`, `delete_history`, `mute`, `archive`,

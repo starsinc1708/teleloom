@@ -117,6 +117,11 @@ class MediaManager:
     ) -> None:
         config = self.settings.profile(profile)
         kind = operation["kind"].removeprefix("media_")
+        if operation.get("owner_authorized") and not kind.startswith("send_"):
+            raise TeleloomError(
+                "unsupported_authorization",
+                "Owner instruction authorization supports media sending only.",
+            )
         if config.kind == "bot" and (operation.get("schedule_date") or operation.get("gif_handle")):
             raise TeleloomError(
                 "unsupported_capability",
@@ -131,7 +136,11 @@ class MediaManager:
                 "backend_required",
                 "Bare uploads and reusable upload handles require the owner-configured MTProto backend.",
             )
-        if kind != "upload_file" and operation["chat_id"] not in config.send_chats:
+        if (
+            kind != "upload_file"
+            and not operation.get("owner_authorized")
+            and operation["chat_id"] not in config.send_chats
+        ):
             raise TeleloomError(
                 "recipient_not_allowed",
                 "The owner has not allowed media delivery to this exact chat.",
@@ -197,13 +206,22 @@ class MediaManager:
         if operation.get("upload_handle"):
             self._handle(profile, operation["upload_handle"], "upload")
             return []
-        return [self.files.validate(profile, file) for file in sources]
+        return [
+            self.files.validate(
+                profile, file, owner_authorized=operation.get("owner_authorized", False)
+            )
+            for file in sources
+        ]
 
-    async def preview(self, profile: str, operation: MediaOperation) -> dict[str, Any]:
+    async def preview(
+        self, profile: str, operation: MediaOperation, owner_authorized: bool = False
+    ) -> dict[str, Any]:
         from .runtime import number
 
         p = operation.model_dump(mode="json")
         p["kind"] = "media_" + p["kind"]
+        if owner_authorized:
+            p["owner_authorized"] = True
         self.allowed(profile, p)
         kind = p["kind"].removeprefix("media_")
         caption = p.get("caption", "")
@@ -237,10 +255,12 @@ class MediaManager:
         captured: list[str] = []
         try:
             for path in paths:
-                descriptor = self.files.capture(profile, path)
+                descriptor = self.files.capture(profile, path, owner_authorized=owner_authorized)
                 captured.append(descriptor["snapshot_id"])
                 files.append(descriptor)
-                content = self.files.validate(profile, descriptor)
+                content = self.files.validate(
+                    profile, descriptor, owner_authorized=owner_authorized
+                )
                 if kind == "send_sticker":
                     _, metadata = image(content)
                     if (
