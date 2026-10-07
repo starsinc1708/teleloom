@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -37,7 +38,12 @@ def native_client(tmp_path, monkeypatch):
     def run(argv, **kwargs):
         assert isinstance(argv, list)
         assert kwargs.get("shell", False) is False
-        assert kwargs["stdin"] == subprocess.DEVNULL
+        if kwargs.get("input") is not None:
+            assert argv[:4] == ["hermes", "mcp", "add", "teleloom"]
+            assert kwargs["input"] == "\n"
+            assert kwargs.get("stdin") is None
+        else:
+            assert kwargs["stdin"] == subprocess.DEVNULL
         assert kwargs["env"]["HERMES_HOME"] == str(tmp_path / "hermes home")
         assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
         calls.append(argv)
@@ -59,6 +65,9 @@ def native_client(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(argv, 7, "", "synthetic-secret")
         if behavior["add"] == "noop":
             return subprocess.CompletedProcess(argv, 0, "Cancelled", "")
+        if client == "hermes" and kwargs.get("input") != "\n":
+            # Native Hermes cancels _choose_tools on EOF after successful discovery.
+            return subprocess.CompletedProcess(argv, 0, "Enable all tools? Cancelled.", "")
         env = dict([args[args.index("--env") + 1].split("=", 1)])
         if client == "opencode":
             assert "--global" in args
@@ -286,3 +295,39 @@ def test_hermes_destination_uses_client_resolution_over_home_guess(
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["destination"] == str((resolved.parent / "skills").resolve())
     assert not (tmp_path / ".hermes" / "skills").exists()
+
+
+@pytest.mark.parametrize("client", ["opencode", "hermes"])
+def test_windows_native_path_spelling_preserves_existing_connection(
+    native_client, monkeypatch, client
+):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "executable", "C:/Teleloom/pythonw.exe")
+    monkeypatch.setattr(
+        "teleloom.cli.Settings.load", lambda: SimpleNamespace(data_dir="C:/Owner state")
+    )
+    runner = CliRunner()
+    fragment = json.loads(runner.invoke(app, ["config", "client", "--client", client]).output)
+    entry = (
+        fragment["mcp"]["servers"]["teleloom"]
+        if client == "opencode"
+        else fragment["mcp_servers"]["teleloom"]
+    )
+    if client == "opencode":
+        entry["command"][0] = entry["command"][0].replace("/", "\\\\")
+        entry["environment"]["TELELOOM_DATA_DIR"] = "c:\\\\Owner state"
+    else:
+        entry["command"] = entry["command"].replace("/", "\\\\")
+        entry["env"]["TELELOOM_DATA_DIR"] = "c:\\\\Owner state"
+    config, opencode, calls, _ = native_client
+    path = opencode if client == "opencode" else config
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    servers = saved["mcp"]["servers"] if client == "opencode" else saved["mcp_servers"]
+    servers["teleloom"] = entry
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    before = path.read_bytes()
+    result = runner.invoke(app, ["config", "client", "--client", client, "--install"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "already_configured"
+    assert path.read_bytes() == before
+    assert not any("add" in call for call in calls)

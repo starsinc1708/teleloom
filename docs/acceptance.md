@@ -33,6 +33,24 @@ These probes made no model calls or Telegram reads/writes. Native model workflow
 automatic skill discovery and Claude Desktop GUI remain **NOT TESTED**; the owner
 waived the Desktop GUI check. Connection success does not prove those behaviors.
 
+## Native client installation correction — 2026-10-07
+
+After PR #8, a Windows user check exposed two missed native contracts: equivalent
+serialized path spellings failed the installer comparison, and Hermes cancelled
+tool selection on EOF. Regression CLI checks now reproduce both; the affected
+offline suite passed 32 cases on Windows / Python 3.12.14.
+
+In isolated directories, native Hermes `mcp add` with one empty stdin response
+saved an enabled server after discovering **one fake MCP tool**. Native OpenCode
+`mcp add --global` saved the requested interpreter, arguments and data directory,
+verified in its isolated JSON configuration. Hermes used a named profile under an
+isolated `HERMES_HOME`; OpenCode's config path was checked before installation.
+Initial probes against an unseeded isolated home timed out; the completed probes
+used seeded temporary configurations. Neither check modified user configuration
+or accessed Telegram. These are native CLI checks with a fake MCP endpoint, not
+live acceptance of the owner's Teleloom connection; the new real-profile recheck
+remains unperformed. OpenCode service connection after reload is also unverified.
+
 ## Automated contract coverage
 
 Public CLI/MCP tests use fake Telegram/model APIs and real temporary SQLite,
