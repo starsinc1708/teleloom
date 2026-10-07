@@ -209,7 +209,14 @@ async def main(*, inject_failure: bool = False, lifetime_report: Path | None = N
                     assert {"fields", "preset"} <= tools[name].inputSchema["properties"].keys()
                 delivery = {
                     "delivery_preview": (
-                        {"profile_id", "recipients", "text", "reply_to_message_id", "broadcast"},
+                        {
+                            "profile_id",
+                            "recipients",
+                            "text",
+                            "reply_to_message_id",
+                            "broadcast",
+                            "owner_authorized",
+                        },
                         {"profile_id", "recipients", "text"},
                         "broadcast",
                         False,
@@ -228,6 +235,12 @@ async def main(*, inject_failure: bool = False, lifetime_report: Path | None = N
                     assert tool.inputSchema["properties"][default_flag]["default"] is False
                     assert tool.annotations and tool.annotations.destructiveHint is destructive
                     assert tool.outputSchema == tools["server_status"].outputSchema
+                assert (
+                    tools["delivery_preview"].inputSchema["properties"]["owner_authorized"][
+                        "default"
+                    ]
+                    is False
+                )
                 for name in ("inbox_ack", "jobs_control", "jobs_status"):
                     assert not {"fields", "preset"} & tools[name].inputSchema["properties"].keys()
                 assert {
