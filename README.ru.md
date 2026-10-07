@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/teleloom.svg" alt="Teleloom — инструменты Telegram, agent skills и MCP-сервер" width="720"></p>
+<p align="center"><img src="docs/assets/teleloom.png" alt="Teleloom — самолётик Telegram с переплетённым шлейфом; инструменты Telegram, agent skills и MCP-сервер" width="720"></p>
 
 # Teleloom
 
