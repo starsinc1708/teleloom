@@ -1,0 +1,36 @@
+         482248 function calls (430456 primitive calls) in 24.950 seconds
+
+   Ordered by: cumulative time
+   List reduced from 907 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        6    0.044    0.007   21.560    3.593 runtime.py:163(tick)
+        6    0.646    0.108   21.516    3.586 jobs.py:743(tick)
+      940    0.017    0.000   18.045    0.019 profile_reading_capacity.py:177(loads)
+      940    0.005    0.000   17.933    0.019 __init__.py:299(loads)
+      940    0.006    0.000   17.926    0.019 decoder.py:333(decode)
+      940   17.911    0.019   17.911    0.019 decoder.py:344(raw_decode)
+       24    0.547    0.023   17.228    0.718 store.py:208(jobs)
+        6    0.532    0.089    5.035    0.839 transcription.py:370(cleanup_expired)
+        6    0.519    0.086    4.878    0.813 events.py:148(cleanup_expired)
+        6    0.457    0.076    4.263    0.710 attachments.py:283(cleanup_expired)
+      204    0.004    0.000    3.387    0.017 base_events.py:1922(_run_once)
+      528    0.001    0.000    3.381    0.006 events.py:86(_run)
+      528    0.001    0.000    3.380    0.006 {method 'run' of '_contextvars.Context' objects}
+      384    0.003    0.000    3.078    0.008 _tasks.py:322(_run_coro)
+       60    0.000    0.000    2.893    0.048 __init__.py:183(dumps)
+       60    0.000    0.000    2.893    0.048 encoder.py:183(encode)
+       60    2.893    0.048    2.893    0.048 encoder.py:205(iterencode)
+       24    0.002    0.000    2.868    0.119 server.py:698(_handle_message)
+       24    0.001    0.000    2.865    0.119 server.py:725(_handle_request)
+       12    0.000    0.000    2.855    0.238 server.py:527(handler)
+       12    0.000    0.000    2.854    0.238 server.py:359(call_tool)
+       12    0.000    0.000    2.854    0.238 tool_manager.py:81(call_tool)
+       12    0.000    0.000    2.854    0.238 base.py:93(run)
+       12    0.000    0.000    2.853    0.238 func_metadata.py:94(call_fn_with_arg_validation)
+       12    0.001    0.000    2.852    0.238 server.py:80(call)
+       12    0.045    0.004    2.820    0.235 runtime.py:208(invoke)
+        6    0.000    0.000    2.320    0.387 server.py:700(jobs_results)
+        6    0.049    0.008    2.277    0.379 jobs.py:221(results)
+        6    0.009    0.001    2.228    0.371 reading_jobs.py:603(results)
+        6    0.096    0.016    2.133    0.355 reading_jobs.py:397(step)

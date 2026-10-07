@@ -1,0 +1,338 @@
+{
+  "schema": "teleloom-digest-revision-v1",
+  "revision_id": "fictional-launch-1",
+  "mode": "historical_as_of",
+  "source_manifest": {
+    "schema": "teleloom-frozen-export-v1",
+    "source": {
+      "kind": "frozen_evidence",
+      "job_id": "314776ae2d98480d8327cc294c1b3fd6",
+      "evidence_ref": "7223cd42871c48e68f9895c83c492d1b"
+    },
+    "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+    "source_sha256": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+    "source_revision": "2025-07-01T00:00:00+00:00",
+    "source_status": "completed",
+    "profile_id": "personal",
+    "profile_generation": "a86fbd72ddd1421785d6c3bec1c14909",
+    "period": {
+      "since": "2025-06-30T00:00:00+00:00",
+      "until": "2025-07-01T00:00:00+00:00"
+    },
+    "selection": {
+      "profile_id": "personal",
+      "generation": "a86fbd72ddd1421785d6c3bec1c14909",
+      "folder_id": null,
+      "items": [
+        {
+          "id": "100",
+          "title": "Engineering",
+          "kind": "chat",
+          "username": null,
+          "unread_count": 3,
+          "read_inbox_max_id": "2",
+          "top_message_id": "5",
+          "is_contact": null,
+          "is_bot": null,
+          "muted": null,
+          "archived": null,
+          "unread_mark": false,
+          "unread_mentions_count": 0,
+          "forum": null
+        },
+        {
+          "id": "200",
+          "title": "Other",
+          "kind": "chat",
+          "username": null,
+          "unread_count": 0,
+          "read_inbox_max_id": "0",
+          "top_message_id": "0",
+          "is_contact": null,
+          "is_bot": null,
+          "muted": null,
+          "archived": null,
+          "unread_mark": false,
+          "unread_mentions_count": 0,
+          "forum": null
+        }
+      ],
+      "unavailable": [
+        {
+          "chat_id": "999",
+          "error": {
+            "code": "chat_not_found",
+            "message": "Unknown target"
+          }
+        }
+      ],
+      "snapshot_at": "2025-07-01T00:00:00+00:00",
+      "source": "telegram",
+      "incomplete": true
+    },
+    "query": null,
+    "coverage": {
+      "snapshot_at": "2025-07-01T00:00:00+00:00",
+      "selected_chats": 2,
+      "requested_since": "2025-06-30T00:00:00+00:00",
+      "requested_until": "2025-07-01T00:00:00+00:00",
+      "requests": 2,
+      "messages": 5,
+      "characters": 178,
+      "chats": [
+        {
+          "chat_id": "100",
+          "complete": true,
+          "returned": 3,
+          "status": "completed"
+        },
+        {
+          "chat_id": "200",
+          "complete": true,
+          "returned": 2,
+          "status": "completed"
+        }
+      ],
+      "limits": {
+        "requests": 200,
+        "messages": 1000,
+        "characters": 100000,
+        "duration_seconds": null
+      },
+      "logical_requests": 2,
+      "observed_rpc_requests": null,
+      "deadline_at": null,
+      "elapsed_seconds": 0
+    },
+    "empty": [],
+    "unavailable": [
+      {
+        "chat_id": "999",
+        "error": {
+          "code": "chat_not_found",
+          "message": "Unknown target"
+        }
+      }
+    ],
+    "errors": [
+      {
+        "chat_id": "999",
+        "error": {
+          "code": "chat_not_found",
+          "message": "Unknown target"
+        }
+      }
+    ],
+    "warnings": [],
+    "incomplete": true,
+    "expires_at": "2025-07-01T00:30:00+00:00",
+    "text_semantics": "original_text and rich_text.blocks retain source evidence; text_source=reconstructed is never a verbatim quote.",
+    "revocation_boundary": "Copies already saved outside the server are outside server revocation."
+  },
+  "export_sha256": "3098da7e1778b51e78eca5ccf5c8fa467de6f24c03e0dd6f2dc80e6fa8593a62",
+  "budgets": {
+    "max_chunk_messages": 2,
+    "max_chunk_bytes": 20000,
+    "reduce_fan_in": 2,
+    "max_reduce_claims": 10,
+    "max_reduce_bytes": 20000
+  },
+  "model_run": null,
+  "claims": [
+    {
+      "id": "launch",
+      "text": "Friday launch was decided, then cancelled.",
+      "kind": "decision",
+      "supporting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "100",
+          "message_id": "1",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "Decision: ship on Friday."
+        }
+      ],
+      "contradicting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "100",
+          "message_id": "2",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "Cancel Friday launch."
+        },
+        {
+          "profile_id": "personal",
+          "chat_id": "200",
+          "message_id": "1",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "Friday is unsafe"
+        }
+      ],
+      "retracts": [],
+      "uncertainty": "none stated"
+    },
+    {
+      "id": "cancel",
+      "text": "Launch waits for QA approval.",
+      "kind": "decision",
+      "supporting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "100",
+          "message_id": "2",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "Cancel Friday launch. Wait for QA approval."
+        }
+      ],
+      "contradicting": [],
+      "retracts": [
+        "launch"
+      ],
+      "uncertainty": "none stated"
+    },
+    {
+      "id": "blocker",
+      "text": "QA reported an unresolved blocker.",
+      "kind": "fact",
+      "supporting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "200",
+          "message_id": "1",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "QA: Friday is unsafe; the blocker is unresolved."
+        }
+      ],
+      "contradicting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "100",
+          "message_id": "1",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "ship on Friday"
+        }
+      ],
+      "retracts": [],
+      "uncertainty": "No resolution observed in the selected period."
+    },
+    {
+      "id": "owner",
+      "text": "Blocker ownership is unconfirmed.",
+      "kind": "question",
+      "supporting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "200",
+          "message_id": "2",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "verbatim",
+          "text": "No owner confirmed."
+        }
+      ],
+      "contradicting": [],
+      "retracts": [],
+      "uncertainty": "Owner unknown."
+    },
+    {
+      "id": "notes",
+      "text": "Readable launch notes were posted.",
+      "kind": "fact",
+      "supporting": [
+        {
+          "profile_id": "personal",
+          "chat_id": "100",
+          "message_id": "3",
+          "source_version": "5d13fbb17432fc9c9c59906dd78dae8ec95200ece390e63b12c9d7673bd55f4d",
+          "rendering": "reconstruction",
+          "text": "Readable launch notes"
+        }
+      ],
+      "contradicting": [],
+      "retracts": [],
+      "uncertainty": "none stated"
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c1",
+      "message_keys": [
+        {
+          "chat_id": "100",
+          "message_id": "1"
+        },
+        {
+          "chat_id": "100",
+          "message_id": "2"
+        }
+      ],
+      "claim_ids": [
+        "launch",
+        "cancel"
+      ]
+    },
+    {
+      "id": "c2",
+      "message_keys": [
+        {
+          "chat_id": "200",
+          "message_id": "1"
+        },
+        {
+          "chat_id": "200",
+          "message_id": "2"
+        }
+      ],
+      "claim_ids": [
+        "blocker",
+        "owner"
+      ]
+    },
+    {
+      "id": "c3",
+      "message_keys": [
+        {
+          "chat_id": "100",
+          "message_id": "3"
+        }
+      ],
+      "claim_ids": [
+        "notes"
+      ]
+    }
+  ],
+  "reductions": [
+    {
+      "id": "r1",
+      "inputs": [
+        "c1",
+        "c2"
+      ],
+      "claim_ids": [
+        "launch",
+        "cancel",
+        "blocker",
+        "owner"
+      ]
+    },
+    {
+      "id": "r2",
+      "inputs": [
+        "r1",
+        "c3"
+      ],
+      "claim_ids": [
+        "launch",
+        "cancel",
+        "blocker",
+        "owner",
+        "notes"
+      ]
+    }
+  ]
+}

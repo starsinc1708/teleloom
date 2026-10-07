@@ -1,0 +1,5 @@
+*
+!dist/
+!dist/*.whl
+!scripts/
+!scripts/container_entry.py

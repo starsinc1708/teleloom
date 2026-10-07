@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" role="img" aria-labelledby="title description">
+<title id="title">Teleloom</title><desc id="description">Telegram tools, agent skills and MCP server</desc>
+<rect width="960" height="240" rx="24" fill="#111e24"/>
+<g fill="none" stroke-linecap="round" stroke-width="12">
+<path d="M70 84 H130 Q154 84 166 110 L178 136 Q190 162 214 162 H246" stroke="#5eead4"/>
+<path d="M70 120 H246" stroke="#f2f4ec"/>
+<path d="M70 156 H130 Q154 156 166 130 L178 104 Q190 78 214 78 H246" stroke="#2dd4bf"/>
+</g>
+<text x="298" y="128" fill="#f2f4ec" font-family="system-ui, sans-serif" font-weight="650" font-size="72" letter-spacing="-2">Teleloom</text>
+<text x="301" y="174" fill="#9fb8bf" font-family="system-ui, sans-serif" font-size="24">Telegram tools · Agent skills · MCP server</text>
+</svg>

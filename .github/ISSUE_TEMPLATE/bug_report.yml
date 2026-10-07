@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible problem with tools, skills or setup
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: "Keep tokens, session strings, QR/login material and private messages out of this report. For vulnerabilities use private security reporting."
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: What complete user task failed?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the tool/CLI command, safe parameters and exact error; use fictional content.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Build and client
+      description: Package version/build ID, OS/Python, client/version, user or bot backend. Share only the build subsection of diagnostics.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Redacted logs or a minimal fictional example, if useful.

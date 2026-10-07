@@ -1,0 +1,17 @@
+# Explicitly provision one existing user account; owner state still carries permissions.
+services:
+  teleloom:
+    secrets:
+      - source: user_api_id
+        target: TELELOOM_PERSONAL_API_ID
+      - source: user_api_hash
+        target: TELELOOM_PERSONAL_API_HASH
+      - source: user_session
+        target: TELELOOM_PERSONAL_SESSION
+secrets:
+  user_api_id:
+    file: ${TELELOOM_PERSONAL_API_ID_FILE:?Set a private API ID file path}
+  user_api_hash:
+    file: ${TELELOOM_PERSONAL_API_HASH_FILE:?Set a private API hash file path}
+  user_session:
+    file: ${TELELOOM_PERSONAL_SESSION_FILE:?Set a private session file path}

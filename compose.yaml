@@ -1,0 +1,22 @@
+services:
+  teleloom:
+    build: .
+    command: ["serve"]
+    init: true
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    volumes:
+      - state:/data
+      - session_locks:/home/teleloom/.local/share/teleloom/session-locks
+    secrets:
+      - source: mcp_token
+        target: TELELOOM_MCP_TOKEN
+volumes:
+  state:
+  session_locks:
+    name: teleloom-session-locks
+secrets:
+  mcp_token:
+    file: ${TELELOOM_MCP_TOKEN_FILE:?Set a private MCP token file path}

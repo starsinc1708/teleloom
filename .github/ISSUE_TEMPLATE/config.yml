@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup and examples
+    url: https://github.com/starsinc1708/teleloom/blob/main/docs/README.md
+    about: Start with setup, client configuration and example workflows
+  - name: Report a vulnerability privately
+    url: https://github.com/starsinc1708/teleloom/security/advisories/new
+    about: Keep credentials and exploitable details out of public issues

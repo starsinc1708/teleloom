@@ -1,0 +1,23 @@
+name: Workflow proposal
+description: Propose a useful complete task for people or agents
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: User workflow
+      description: What do you want to accomplish, and what is missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Observable result
+      description: What would make this task complete? Include scope, access controls and failure behavior where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Existing tools or alternatives
+      description: Could a current tool/skill already cover part of the task?

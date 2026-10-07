@@ -1,0 +1,32 @@
+{
+  "manifest_version": "0.4",
+  "name": "teleloom",
+  "display_name": "Teleloom",
+  "version": "0.5.0",
+  "description": "Telegram tools and MCP server for portable agent skills: scoped reading, sourced summaries and confirmed actions.",
+  "author": {"name": "starsinc1708"},
+  "repository": {"type": "git", "url": "https://github.com/starsinc1708/teleloom"},
+  "license": "MIT",
+  "server": {
+    "type": "uv",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--frozen", "--directory", "${__dirname}", "server.py"],
+      "env": {"TELELOOM_DATA_DIR": "${user_config.data_directory}", "UV_PROJECT_ENVIRONMENT": "${__dirname}/.venv"}
+    }
+  },
+  "tools_generated": true,
+  "user_config": {
+    "data_directory": {
+      "type": "directory",
+      "title": "Existing teleloom data directory",
+      "description": "Select the private owner directory configured with teleloom init/auth. Permissions and OS credentials stay under that owner's control.",
+      "required": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {"python": ">=3.12,<3.15"}
+  }
+}

@@ -1,0 +1,330 @@
+{
+  "label": "baseline-457b9f1",
+  "source": "457b9f1b96e306db38b386dac247e111ff3d4abe",
+  "environment": {
+    "python": "3.12.14 (main, Sep  1 2026, 14:17:39) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "sqlite": "3.53.1",
+    "logical_cpus": 16,
+    "background_load": "Parent-reported seven concurrent independent chats; 16 logical CPUs; approximately 32 GiB host RAM; no CPU isolation",
+    "load_average": null
+  },
+  "samples_per_boundary": 1,
+  "traced_replay_per_boundary": 1,
+  "fixtures": [
+    {
+      "messages": 1000,
+      "terminal_archives": 0,
+      "job_bytes": 840675,
+      "snapshot_bytes": 839828,
+      "measurements": {
+        "tick": {
+          "wall_seconds": 0.01756879998720251,
+          "instrumented_seconds": 0.11466110000037588,
+          "instrumentation_overhead_seconds": 0.09709230001317337,
+          "traced_peak_bytes": 4365194,
+          "job_decodes": 5,
+          "decoded_job_bytes": 3784458,
+          "checkpoint_writes": 2,
+          "checkpoint_bytes": 1597657,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 0
+        },
+        "status": {
+          "wall_seconds": 0.009988100006012246,
+          "instrumented_seconds": 0.0552717000246048,
+          "instrumentation_overhead_seconds": 0.04528360001859255,
+          "traced_peak_bytes": 3354543,
+          "job_decodes": 1,
+          "decoded_job_bytes": 840675,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 3985
+        },
+        "snapshot": {
+          "wall_seconds": 0.019434499990893528,
+          "instrumented_seconds": 0.12200420000590384,
+          "instrumentation_overhead_seconds": 0.10256970001501031,
+          "traced_peak_bytes": 3257249,
+          "job_decodes": 1,
+          "decoded_job_bytes": 840675,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 164841
+        }
+      }
+    },
+    {
+      "messages": 1000,
+      "terminal_archives": 10,
+      "job_bytes": 840675,
+      "snapshot_bytes": 839828,
+      "measurements": {
+        "tick": {
+          "wall_seconds": 0.1419424999912735,
+          "instrumented_seconds": 0.8036235999898054,
+          "instrumentation_overhead_seconds": 0.6616810999985319,
+          "traced_peak_bytes": 18942861,
+          "job_decodes": 45,
+          "decoded_job_bytes": 37406938,
+          "checkpoint_writes": 2,
+          "checkpoint_bytes": 1597657,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 0
+        },
+        "status": {
+          "wall_seconds": 0.010949999996228144,
+          "instrumented_seconds": 0.06707160000223666,
+          "instrumentation_overhead_seconds": 0.05612160000600852,
+          "traced_peak_bytes": 3246152,
+          "job_decodes": 1,
+          "decoded_job_bytes": 840675,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 3985
+        },
+        "snapshot": {
+          "wall_seconds": 0.030777900014072657,
+          "instrumented_seconds": 0.1304723999928683,
+          "instrumentation_overhead_seconds": 0.09969449997879565,
+          "traced_peak_bytes": 3252049,
+          "job_decodes": 1,
+          "decoded_job_bytes": 840675,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 164841
+        }
+      }
+    },
+    {
+      "messages": 1000,
+      "terminal_archives": 100,
+      "job_bytes": 840675,
+      "snapshot_bytes": 839828,
+      "measurements": {
+        "tick": {
+          "wall_seconds": 2.1743567000085022,
+          "instrumented_seconds": 9.584428400004981,
+          "instrumentation_overhead_seconds": 7.410071699996479,
+          "traced_peak_bytes": 150344965,
+          "job_decodes": 405,
+          "decoded_job_bytes": 340009259,
+          "checkpoint_writes": 2,
+          "checkpoint_bytes": 1597658,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 0
+        },
+        "status": {
+          "wall_seconds": 0.011984500015387312,
+          "instrumented_seconds": 0.06602319999365136,
+          "instrumentation_overhead_seconds": 0.05403869997826405,
+          "traced_peak_bytes": 3245515,
+          "job_decodes": 1,
+          "decoded_job_bytes": 840675,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 3985
+        },
+        "snapshot": {
+          "wall_seconds": 0.036900200007949024,
+          "instrumented_seconds": 0.15093499998329207,
+          "instrumentation_overhead_seconds": 0.11403479997534305,
+          "traced_peak_bytes": 3251972,
+          "job_decodes": 1,
+          "decoded_job_bytes": 840675,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 164841
+        }
+      }
+    },
+    {
+      "messages": 10000,
+      "terminal_archives": 0,
+      "job_bytes": 8409689,
+      "snapshot_bytes": 8408837,
+      "measurements": {
+        "tick": {
+          "wall_seconds": 0.34384779998799786,
+          "instrumented_seconds": 1.5739592999743763,
+          "instrumentation_overhead_seconds": 1.2301114999863785,
+          "traced_peak_bytes": 45627574,
+          "job_decodes": 5,
+          "decoded_job_bytes": 41629512,
+          "checkpoint_writes": 2,
+          "checkpoint_bytes": 16735685,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 0
+        },
+        "status": {
+          "wall_seconds": 0.03916770001524128,
+          "instrumented_seconds": 0.19967430000542663,
+          "instrumentation_overhead_seconds": 0.16050659999018535,
+          "traced_peak_bytes": 31455889,
+          "job_decodes": 1,
+          "decoded_job_bytes": 8409689,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 4011
+        },
+        "snapshot": {
+          "wall_seconds": 0.1477862999890931,
+          "instrumented_seconds": 0.8468556999869179,
+          "instrumentation_overhead_seconds": 0.6990693999978248,
+          "traced_peak_bytes": 31461043,
+          "job_decodes": 1,
+          "decoded_job_bytes": 8409689,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 165255
+        }
+      }
+    },
+    {
+      "messages": 10000,
+      "terminal_archives": 10,
+      "job_bytes": 8409689,
+      "snapshot_bytes": 8408835,
+      "measurements": {
+        "tick": {
+          "wall_seconds": 0.3876289000036195,
+          "instrumented_seconds": 1.7806056999834254,
+          "instrumentation_overhead_seconds": 1.392976799979806,
+          "traced_peak_bytes": 60227114,
+          "job_decodes": 45,
+          "decoded_job_bytes": 75252152,
+          "checkpoint_writes": 2,
+          "checkpoint_bytes": 16735685,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 0
+        },
+        "status": {
+          "wall_seconds": 0.03641440000501461,
+          "instrumented_seconds": 0.1854882999905385,
+          "instrumentation_overhead_seconds": 0.1490738999855239,
+          "traced_peak_bytes": 31455223,
+          "job_decodes": 1,
+          "decoded_job_bytes": 8409689,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 4011
+        },
+        "snapshot": {
+          "wall_seconds": 0.12166670002625324,
+          "instrumented_seconds": 0.6847244999953546,
+          "instrumentation_overhead_seconds": 0.5630577999691013,
+          "traced_peak_bytes": 31462736,
+          "job_decodes": 1,
+          "decoded_job_bytes": 8409689,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 165255
+        }
+      }
+    },
+    {
+      "messages": 10000,
+      "terminal_archives": 100,
+      "job_bytes": 8409690,
+      "snapshot_bytes": 8408838,
+      "measurements": {
+        "tick": {
+          "wall_seconds": 1.9754622999753337,
+          "instrumented_seconds": 7.703134899988072,
+          "instrumentation_overhead_seconds": 5.727672600012738,
+          "traced_peak_bytes": 191630490,
+          "job_decodes": 405,
+          "decoded_job_bytes": 377855912,
+          "checkpoint_writes": 2,
+          "checkpoint_bytes": 16735686,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 0
+        },
+        "status": {
+          "wall_seconds": 0.035326399985933676,
+          "instrumented_seconds": 0.19382210000185296,
+          "instrumentation_overhead_seconds": 0.15849570001591928,
+          "traced_peak_bytes": 31455697,
+          "job_decodes": 1,
+          "decoded_job_bytes": 8409690,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 4013
+        },
+        "snapshot": {
+          "wall_seconds": 0.12454489999799989,
+          "instrumented_seconds": 0.6885672999778762,
+          "instrumentation_overhead_seconds": 0.5640223999798764,
+          "traced_peak_bytes": 31461586,
+          "job_decodes": 1,
+          "decoded_job_bytes": 8409690,
+          "checkpoint_writes": 0,
+          "checkpoint_bytes": 0,
+          "process_memory": {
+            "unavailable": true
+          },
+          "response_bytes": 165257
+        }
+      }
+    }
+  ],
+  "runtime_file_sha256": {
+    "src/teleloom/store.py": "f75e9646665742f1d7e0f3ecf3d35b119ab453aa00f3575b29685374135fdd78",
+    "src/teleloom/jobs.py": "b09448941db35d1c972f759dff1e4db932736076d7c8a43ab92f6d6459230cea",
+    "src/teleloom/reading_jobs.py": "436e0c48bf0906c08adbee63f1663db71f291e0865bc3f4f0e1b276dc047c111",
+    "src/teleloom/attachments.py": "5b4563bd5525b9d759fb554813d9d2eef4ad4ace5e0c46f0f6aac7a1862bdded",
+    "src/teleloom/events.py": "4719d34fe5f49eb2e697791e7aa100cfed6277a21fa8c57b027680b9275618e8",
+    "src/teleloom/transcription.py": "069e98207b922ef933856b7a9fda8a682f418037f6c995dd82c6c670768e44c4",
+    "src/teleloom/server.py": "2af75e91551977725b1a7ae690ee0fc7533295db3997fcdd3c488765417da367"
+  },
+  "limitations": [
+    "One uninstrumented timing sample plus one instrumented replay per boundary; no percentile claims.",
+    "Seven concurrent chats reported by parent; dynamic CPU utilization not sampled and no CPU isolation.",
+    "Original Win32 RSS probe returned unavailable; zero-initialized counters were not measurements. Python tracemalloc peaks are valid. The reproduction script handle signature is corrected without changing timed boundaries."
+  ]
+}
