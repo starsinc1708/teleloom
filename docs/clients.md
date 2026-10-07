@@ -23,7 +23,11 @@ Existing settings and other servers are left to the native client's merge logic.
 An identical active connection returns `already_configured` without rewriting it,
 retaining client-specific options. A different command, arguments, environment or
 disabled connection is a conflict and requires manual review; there is no automatic
-replacement. After `mcp add`, Teleloom checks that the requested active entry was
+replacement. On Windows, equivalent executable/data-directory paths (including
+repeated separators) match without rewriting them; other arguments and environment
+values remain exact. Hermes receives one empty response to enable discovered tools;
+its refusal defaults for overwrite or failed discovery remain in effect.
+After `mcp add`, Teleloom checks that the requested active entry was
 saved. Missing CLI, command failure, cancellation or unreadable configuration is an
 error, never installation success. Registration alone does not establish live
 Telegram connectivity; reconnect and use the discovery checks below.
@@ -65,6 +69,7 @@ takes priority and skips client discovery. Existing skills remain protected unle
 Check native discovery without a model call:
 
 ```text
+opencode reload
 opencode mcp list
 hermes mcp test teleloom
 pi mcp list
@@ -73,7 +78,8 @@ claude mcp list
 
 OpenCode 2 starts connections asynchronously. An initial empty/pending result
 is inconclusive: leave its service running, then check again after startup.
-`opencode api mcp.list` exposes the native v2 connection status. Do not interpret
+Reload a running service after registering MCP. `opencode api mcp.list` exposes
+the native v2 connection status for the location in its response. Do not interpret
 an empty catalog as success. Pi's current official package is
 `@earendil-works/pi-coding-agent`; native MCP does not require another extension.
 

@@ -2,6 +2,7 @@ import asyncio
 import functools
 import json
 import logging
+import ntpath
 import os
 import secrets
 import shutil
@@ -699,10 +700,14 @@ def client_cli(client: Client, args: list[str]) -> str:
             f"{client.value} CLI was not found on PATH; install it or use a manual fragment/--target.",
         )
     try:
+        # Hermes cancels tool selection on EOF. An empty answer enables discovered
+        # tools, but retains its "no" defaults for overwrite or failed discovery.
+        enable_tools = client == Client.hermes and args[:3] == ["mcp", "add", "teleloom"]
         result = subprocess.run(
             [executable, *args],
             shell=False,
-            stdin=subprocess.DEVNULL,
+            stdin=None if enable_tools else subprocess.DEVNULL,
+            input="\n" if enable_tools else None,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -787,10 +792,42 @@ def install_client(client: Client, entry: dict[str, Any]) -> None:
         else entry
     )
 
+    def same_path(saved: Any, wanted: str) -> bool:
+        return isinstance(saved, str) and (
+            saved == wanted
+            or (
+                sys.platform == "win32"
+                and ntpath.isabs(saved)
+                and ntpath.isabs(wanted)
+                and ntpath.normcase(ntpath.normpath(saved))
+                == ntpath.normcase(ntpath.normpath(wanted))
+            )
+        )
+
     def matches(saved: Any) -> bool:
+        if not isinstance(saved, dict):
+            return False
+        saved = dict(saved)
+        saved_command = saved.get("command")
+        if client == Client.opencode:
+            if not isinstance(saved_command, list) or not saved_command:
+                return False
+            if not same_path(saved_command[0], command):
+                return False
+            saved["command"] = [command, *saved_command[1:]]
+        else:
+            if not same_path(saved_command, command):
+                return False
+            saved["command"] = command
+        env_key = "environment" if client == Client.opencode else "env"
+        saved_env = saved.get(env_key)
+        if not isinstance(saved_env, dict) or not same_path(
+            saved_env.get("TELELOOM_DATA_DIR"), env["TELELOOM_DATA_DIR"]
+        ):
+            return False
+        saved[env_key] = {**saved_env, "TELELOOM_DATA_DIR": env["TELELOOM_DATA_DIR"]}
         return (
-            isinstance(saved, dict)
-            and all(saved.get(key) == value for key, value in expected.items())
+            all(saved.get(key) == value for key, value in expected.items())
             and saved.get("enabled", True) is not False
             and saved.get("disabled", False) is not True
             and "url" not in saved
