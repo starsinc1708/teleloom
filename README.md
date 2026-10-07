@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/teleloom.png" alt="Teleloom — Telegram paper plane with woven flight trails; Telegram tools, agent skills and MCP server" width="720"></p>
+<p align="center"><img src="docs/assets/teleloom.png" alt="Teleloom — Telegram × MCP; 67 tools and 6 skills; chrome paper plane with woven flight trails" width="720"></p>
 
 <p align="center"><strong>Your Telegram, ready for agents.</strong><br>
 A Telegram toolkit with portable agent skills, an MCP server and a CLI.</p>
