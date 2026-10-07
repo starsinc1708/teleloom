@@ -19,10 +19,17 @@ reviewing these files, separate from the Teleloom owner.
 
 This is an owner workspace for operating accounts, sources and exact actions.
 Navigation stays stable; each page exposes its primary task and the next step.
-The chrome wordmark and paper-plane artwork carry the brand. Working surfaces
-are matte graphite with a single lime action/selection accent; amber and rose
-have distinct warning/error roles. Dense source records and process tables use
-quiet dividers rather than decorative charts.
+The supplied wordmark and paper-plane artwork carry the brand. Owner status and
+the unresolved receipt come before the profile/process lists. Counts stay in
+the workspace identity row. Working surfaces are matte graphite with a single
+lime action/selection accent; amber and rose have distinct warning/error roles.
+Dense source records and process tables use quiet dividers. Forms, message
+evidence and dialogs retain boundaries where they clarify the task.
+
+The owner's anti-slop refinement uses `ui-taste` audit/distill/polish and the
+grid/geometry guidance of `industrial-brutalist-ui`, adapted to the supplied
+lime/chrome identity. It removes the promotional hero, equal counter tiles,
+repeated panel frames, decorative status pills and slogan/issue-number labels.
 
 | Role | Choice |
 | --- | --- |
@@ -32,7 +39,7 @@ quiet dividers rather than decorative charts.
 | Typography | Segoe UI or system sans; Cascadia Code or system monospace |
 | Scale | Heading 32/38; section 18/25; body 14/22; metadata 12 |
 | Spacing | 4, 8, 12, 16, 24, 32 px |
-| Corners | Surfaces 8 px; controls 5 px; dialogs 12 px |
+| Corners | Straight edges on surfaces, controls and dialogs |
 | Motion | Short state transitions; reduced motion disables animation |
 
 Below 900 px, navigation becomes a drawer. Below 640 px, form/overview columns
