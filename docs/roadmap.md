@@ -65,6 +65,9 @@ flowchart TD
 
 ## M1 and M2: browser GUI and connections
 
+The [browser GUI design concept](design/README.md) maps the proposed screens to
+implementation issues #20–#32, with a clickable prototype and screenshots.
+
 Start with a local control panel: installation/build identity, profile/backend,
 connection state, effective chat access, exposed tools, active jobs and receipts.
 Add a searchable capability view and explain failures with a concrete next step.
