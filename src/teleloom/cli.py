@@ -2,8 +2,10 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import secrets
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from enum import StrEnum
@@ -41,7 +43,7 @@ profile_app = typer.Typer(
 skills_app = typer.Typer(
     help="Install portable teleloom skills without overwriting existing files."
 )
-config_app = typer.Typer(help="Generate client configuration fragments.")
+config_app = typer.Typer(help="Print client configuration or explicitly install supported clients.")
 cache_app = typer.Typer(help="Explicit local index maintenance.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(profile_app, name="profile")
@@ -649,14 +651,15 @@ def install_skills(
         Client.claude: ".claude/skills",
         Client.opencode: ".config/opencode/skills",
         Client.opencode_v1: ".config/opencode/skills",
-        Client.hermes: ".hermes/skills",
         Client.pi: ".pi/agent/skills",
     }
-    destination = (
-        (target if target is not None else Path.home() / homes[client or Client.codex])
-        .expanduser()
-        .resolve()
-    )
+    if target is not None:
+        destination = target
+    elif client == Client.hermes:
+        destination = hermes_config_path().parent / "skills"
+    else:
+        destination = Path.home() / homes[client or Client.codex]
+    destination = destination.expanduser().resolve()
     bundled = Path(__file__).parent / "bundled_skills"
     source = bundled if bundled.exists() else Path(__file__).resolve().parents[2] / "skills"
     skills = sorted(
@@ -688,10 +691,141 @@ def install_skills(
     )
 
 
+def client_cli(client: Client, args: list[str]) -> str:
+    executable = shutil.which(client.value)
+    if executable is None:
+        raise TeleloomError(
+            "client_cli_unavailable",
+            f"{client.value} CLI was not found on PATH; install it or use a manual fragment/--target.",
+        )
+    try:
+        result = subprocess.run(
+            [executable, *args],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+        raise TeleloomError(
+            "client_install_failed",
+            f"{client.value} CLI could not complete {args[0]} {args[1]}; check the client before retrying.",
+        ) from exc
+    # Hermes reports an absent optional section as an error, not JSON null.
+    if (
+        client == Client.hermes
+        and args == ["config", "get", "mcp_servers", "--json"]
+        and result.returncode == 1
+        and result.stderr.strip() == "Config key not set: mcp_servers"
+    ):
+        return "{}"
+    if result.returncode:
+        raise TeleloomError(
+            "client_install_failed",
+            f"{client.value} {args[0]} {args[1]} failed (exit {result.returncode}); run the native command for diagnostics.",
+        )
+    return result.stdout
+
+
+def hermes_config_path() -> Path:
+    # The client resolves HERMES_HOME and the active profile; do not guess its home.
+    output = client_cli(Client.hermes, ["config", "path"]).strip()
+    path = Path(output).expanduser()
+    if not output or "\n" in output or not path.is_absolute():
+        raise TeleloomError(
+            "client_config_unavailable",
+            "hermes config path did not return an absolute file path; use --target.",
+        )
+    return path
+
+
+def client_entries(client: Client) -> list[Any]:
+    args = (
+        ["debug", "config"]
+        if client == Client.opencode
+        else ["config", "get", "mcp_servers", "--json"]
+    )
+    output = client_cli(client, args)
+    try:
+        config = json.loads(output)
+        if client == Client.opencode:
+            if not isinstance(config, list):
+                raise ValueError
+            servers = [
+                item["info"].get("mcp", {}).get("servers", {})
+                for item in config
+                if item["type"] == "document"
+            ]
+        else:
+            servers = [config]
+        if any(not isinstance(items, dict) for items in servers):
+            raise ValueError
+        return [items["teleloom"] for items in servers if "teleloom" in items]
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise TeleloomError(
+            "client_config_unavailable",
+            f"{client.value} CLI did not return readable configuration; check the client before retrying.",
+        ) from exc
+
+
+def install_client(client: Client, entry: dict[str, Any]) -> None:
+    if client not in {Client.opencode, Client.hermes}:
+        raise TeleloomError(
+            "client_install_unsupported",
+            "--install supports only OpenCode 2 (opencode) and Hermes.",
+        )
+    command = entry["command"]
+    args = entry["args"]
+    env = entry["env"]
+    expected = (
+        {"type": "local", "command": [command, *args], "environment": env}
+        if client == Client.opencode
+        else entry
+    )
+
+    def matches(saved: Any) -> bool:
+        return (
+            isinstance(saved, dict)
+            and all(saved.get(key) == value for key, value in expected.items())
+            and saved.get("enabled", True) is not False
+            and saved.get("disabled", False) is not True
+            and "url" not in saved
+        )
+
+    existing = client_entries(client)
+    if any(not matches(saved) for saved in existing):
+        raise TeleloomError(
+            "client_config_conflict",
+            f"{client.value} already has a different teleloom entry; it was preserved. Review it in the client before installing.",
+        )
+    if existing:
+        status = "already_configured"
+    else:
+        assignment = "TELELOOM_DATA_DIR=" + env["TELELOOM_DATA_DIR"]
+        native_args = ["mcp", "add", "teleloom"]
+        if client == Client.opencode:
+            native_args += ["--global", "--env", assignment, "--", command, *args]
+        else:
+            native_args += ["--command", command, "--env", assignment, "--args", *args]
+        client_cli(client, native_args)
+        installed = client_entries(client)
+        if not installed or any(not matches(saved) for saved in installed):
+            raise TeleloomError(
+                "client_install_failed",
+                f"{client.value} did not save the requested active teleloom entry; check its configuration before retrying.",
+            )
+        status = "installed"
+    typer.echo(json.dumps({"client": client.value, "status": status}))
+
+
 @config_app.command("client")
 @guarded
-def client_config(client: Client = Client.codex) -> None:
-    """Print a mergeable client fragment using this installed Python; never expose a token. opencode targets v2; use opencode-v1 for the legacy format."""
+def client_config(client: Client = Client.codex, install: bool = False) -> None:
+    """Print a mergeable fragment; --install registers OpenCode 2 or Hermes using their CLI."""
     settings = Settings.load()
     command = sys.executable
     if sys.platform == "win32":
@@ -701,6 +835,9 @@ def client_config(client: Client = Client.codex) -> None:
     args = ["-m", "teleloom", "mcp"]
     env = {"TELELOOM_DATA_DIR": str(settings.data_dir)}
     entry = {"command": command, "args": args, "env": env}
+    if install:
+        install_client(client, entry)
+        return
     if client == Client.codex:
         typer.echo(
             "[mcp_servers.teleloom]\ncommand = "
