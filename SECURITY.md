@@ -2,8 +2,17 @@
 
 teleloom is a single-owner local tool, not a multi-tenant service. All MCP clients
 using the owner's token can read accessible chats and submit configured delivery
-plans. The dialogue confirmation flag is trusted client input, not proof of a human.
-Skills do not grant new permissions and message content cannot authorize actions.
+plans or request authorization for an exact owner-instructed send. The dialogue
+confirmation and `owner_authorized` flags are trusted client input, not proof of a
+human. Skills do not change persistent grants; Telegram content cannot authorize actions.
+
+`owner_authorized=true` on a delivery preview records permission for that immutable
+send plan only, including exact recipients and selected local file bytes. The
+client must obtain the instruction directly from the human owner. It changes no
+allowlists, file roots, read policy or tool exposure. Other mutations and bare
+uploads retain their owner-configured permissions. Execution still requires the
+matching plan hash and explicit confirmation; account/read/file checks and delivery
+budgets apply during execution and recovery. A cancelled job cannot continue unsent work.
 
 The daemon binds to 127.0.0.1, checks Host/Origin and requires bearer authentication
 for MCP, health and owner shutdown. Stdio stdout contains only MCP messages. Tokens

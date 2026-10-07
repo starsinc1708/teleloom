@@ -53,6 +53,27 @@ remains unperformed. OpenCode service connection after reload is also unverified
 
 ## Automated contract coverage
 
+### Owner-instructed delivery plans — 2026-10-07
+
+Issue #12 was reproduced through authenticated HTTP MCP: a profile without a
+standing send grant returned `recipient_not_allowed` even for an explicitly
+owner-authorized request. The new optional preview argument authorizes only its
+hash-bound send plan and selected file snapshots; persistent configuration is
+checked byte-for-byte unchanged.
+
+On Windows / Python 3.12.14, the affected delivery/message/mutation/media/skill
+selection passed **72 tests in 46.50 seconds**. After adding recipient/path bounds
+and extending the existing real aiogram multipart-model check, the authorization
+and Bot API selection passed **22 tests in 20.48 seconds** (overlapping the first
+selection). These use fake external Telegram APIs/SDKs and real temporary state.
+They cover formatted sends, broadcasts, confirmation/hash/profile binding,
+read/account/expiry changes, exact files, unsafe/changed sources, all five Bot API
+media send kinds, durable restart and unknown outcomes without repeat delivery.
+Edited-file Ruff/format, mypy (41 runtime files) and all six skill validations passed.
+
+The installed v0.5.0 owner and its user configuration were not upgraded or changed;
+live Telegram delivery and agent recognition of the new workflow remain untested.
+
 Public CLI/MCP tests use fake Telegram/model APIs and real temporary SQLite,
 queues, HTTP/stdio and isolated package processes. They exercise grants and profile
 isolation, confirmation/hash binding, restart and unknown receipts, projection,

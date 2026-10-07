@@ -5,7 +5,7 @@ inspect capabilities and one exact readable message before choosing OCR/STT or
 inline pixels. `media_info`, photo rendering and ordinary message reads do not
 start extraction or an AI upload. Captions remain original source evidence.
 
-File-root permission is needed for owner source-file reads and an explicitly
+File-root permission is needed for standing owner source-file reads and an explicitly
 requested new `destination_path`/`save_path`, not for job-private Telegram downloads
 or inline photo rendering. Extraction/transcription accepts selected message IDs,
 not arbitrary local media paths. Keep private copies under the existing owner data
@@ -18,13 +18,18 @@ teleloom profile file-root personal C:\owner-selected\media --enable
 teleloom profile file-root personal C:\owner-selected\media --disable
 ```
 
-An exact send target must also appear in the profile's send permission. Read
-permission applies separately to selected message photos, avatar owners and
+For an explicit human instruction selecting the exact files and send target,
+`media_operation_preview(..., owner_authorized=true)` authorizes only that immutable
+send plan and its safely verified source files. It changes no file roots or chat
+allowlists; bare uploads and reusable upload handles retain their configured-root
+workflow. Default media previews require the configured file roots and send target.
+Read permission applies separately to selected message photos, avatar owners and
 reply/topic source messages. A file name, caption or photo does not grant permission.
 
 Use `media_operation_preview` with one typed operation: `send_file`, `send_album`,
 `send_voice`, `send_sticker`, `send_gif` or `upload_file`. Source paths must be
-absolute, under a currently permitted file root and free of links, junctions,
+absolute, under a currently permitted file root or exactly owner-selected for this
+authorized send, and free of links, junctions,
 reparse points and traversal. A new optional download/save destination follows
 the same root policy and cannot overwrite an existing file. Open file handles
 are checked against the verified destination before private bytes are written.

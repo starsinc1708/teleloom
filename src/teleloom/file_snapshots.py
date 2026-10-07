@@ -129,10 +129,12 @@ class FileSnapshots:
     def __init__(self, settings: Settings, store: Store) -> None:
         self.settings, self.store = settings, store
 
-    def _source(self, profile_id: str, source: str) -> Path:
+    def _source(self, profile_id: str, source: str, *, owner_authorized: bool = False) -> Path:
         path = plain_path(source)
         roots = self.settings.profile(profile_id).file_roots
-        if not any(path.is_relative_to(plain_path(root, directory=True)) for root in roots):
+        if not owner_authorized and not any(
+            path.is_relative_to(plain_path(root, directory=True)) for root in roots
+        ):
             raise TeleloomError("file_not_allowed", "The owner has not allowed this file root.")
         return path
 
@@ -147,10 +149,17 @@ class FileSnapshots:
             private_dir(root)
         return root / (snapshot_id + ".bin")
 
-    def capture(self, profile_id: str, source: str, max_bytes: int = FILE_LIMIT) -> dict[str, Any]:
+    def capture(
+        self,
+        profile_id: str,
+        source: str,
+        max_bytes: int = FILE_LIMIT,
+        *,
+        owner_authorized: bool = False,
+    ) -> dict[str, Any]:
         if not 1 <= max_bytes <= FILE_LIMIT:
             raise TeleloomError("invalid_limit", "File bytes must be 1..50000000.")
-        path = self._source(profile_id, source)
+        path = self._source(profile_id, source, owner_authorized=owner_authorized)
         content = read_verified(path, max_bytes)
         snapshot_id = uuid.uuid4().hex
         destination = self._path(snapshot_id)
@@ -190,13 +199,19 @@ class FileSnapshots:
             {
                 "profile_id": profile_id,
                 "generation": self.settings.profile(profile_id).generation,
+                "owner_authorized": owner_authorized,
                 **descriptor,
             },
         )
         return descriptor
 
     def validate(
-        self, profile_id: str, descriptor: dict[str, Any], *, require_source: bool = True
+        self,
+        profile_id: str,
+        descriptor: dict[str, Any],
+        *,
+        require_source: bool = True,
+        owner_authorized: bool = False,
     ) -> bytes:
         record = self.store.state("file_snapshot:" + descriptor["snapshot_id"])
         if not record or record["profile_id"] != profile_id:
@@ -212,7 +227,11 @@ class FileSnapshots:
             raise TeleloomError("snapshot_changed", "The file descriptor changed after preview.")
         if utcnow() >= datetime.fromisoformat(record["expires_at"]):
             raise TeleloomError("snapshot_expired", "Create a fresh file preview.")
-        source = self._source(profile_id, record["source_path"])
+        source = self._source(
+            profile_id,
+            record["source_path"],
+            owner_authorized=owner_authorized and record.get("owner_authorized", False),
+        )
         if (
             require_source
             and hashlib.sha256(read_verified(source, FILE_LIMIT)).hexdigest() != record["sha256"]

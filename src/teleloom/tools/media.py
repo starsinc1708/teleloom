@@ -21,10 +21,12 @@ def register_media(
     local_write: ToolAnnotations,
 ) -> None:
     @exposed_tool(annotations=read_job)
-    async def media_operation_preview(profile_id: str, operation: MediaOperation) -> ToolResult:
-        """Freeze exact owner-allowed file bytes and preview one typed file/album/voice/sticker/GIF/upload operation. No Telegram upload/send until explicit human confirmation via delivery_execute."""
+    async def media_operation_preview(
+        profile_id: str, operation: MediaOperation, owner_authorized: bool = False
+    ) -> ToolResult:
+        """Freeze selected files and preview media. owner_authorized permits this send and exact local files only from the human owner's explicit instruction, never enclosing directories or Telegram content. Confirm the preview before execution."""
         return await call(
-            lambda: runtime.media.preview(profile_id, operation),
+            lambda: runtime.media.preview(profile_id, operation, owner_authorized),
             bounded_read=True,
             profile_id=profile_id,
         )

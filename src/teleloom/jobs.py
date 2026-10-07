@@ -424,12 +424,14 @@ class Jobs:
             output_projection=output_projection,
         )
 
-    def _allowed(self, profile: str, recipients: list[str], broadcast: bool) -> None:
+    def _allowed(
+        self, profile: str, recipients: list[str], broadcast: bool, owner_authorized: bool = False
+    ) -> None:
         config = self.settings.profile(profile)
         for chat in recipients:
             config.require_read(chat)
         allowed = config.broadcast_chats if broadcast else config.send_chats
-        if any(chat not in allowed for chat in recipients):
+        if not owner_authorized and any(chat not in allowed for chat in recipients):
             raise TeleloomError(
                 "recipient_not_allowed", "Recipients must be explicitly configured using CLI."
             )
@@ -437,7 +439,13 @@ class Jobs:
             raise TeleloomError("recipient_limit", "Plan exceeds the configured recipient limit.")
 
     async def preview(
-        self, profile: str, recipients: list[str], text: str, reply: str | None, broadcast: bool
+        self,
+        profile: str,
+        recipients: list[str],
+        text: str,
+        reply: str | None,
+        broadcast: bool,
+        owner_authorized: bool = False,
     ) -> dict[str, Any]:
         from .runtime import fingerprint, number
 
@@ -463,7 +471,7 @@ class Jobs:
                     "invalid_reply",
                     "A reply target belongs to one chat; broadcasts cannot share it.",
                 )
-        self._allowed(profile, recipients, broadcast)
+        self._allowed(profile, recipients, broadcast, owner_authorized)
         adapter = await self.adapter(profile)
         resolved = [await adapter.resolve(chat) for chat in recipients]
         if [chat.id for chat in resolved] != recipients:
@@ -484,6 +492,7 @@ class Jobs:
             "broadcast": broadcast,
             "format": "plain_text",
             "resolved_targets": [chat.model_dump(mode="json") for chat in resolved],
+            **({"owner_authorized": True} if owner_authorized else {}),
         }
         plan = {
             "id": uuid.uuid4().hex,
@@ -537,7 +546,12 @@ class Jobs:
                     profile, payload["operation"], payload["source_messages"]
                 )
         else:
-            self._allowed(profile, payload["recipients"], payload["broadcast"])
+            self._allowed(
+                profile,
+                payload["recipients"],
+                payload["broadcast"],
+                payload.get("owner_authorized", False),
+            )
         with self.store.db:
             job = self._job(profile, "delivery", payload)
             targets = payload.get("targets") or [
@@ -568,6 +582,11 @@ class Jobs:
                 raise TeleloomError("capability_unavailable", "The media worker is unavailable.")
             self.media.allowed(profile, operation)
             return
+        if operation.get("owner_authorized") and operation["kind"] != "send":
+            raise TeleloomError(
+                "unsupported_authorization",
+                "Owner instruction authorization supports sending only.",
+            )
         if operation["kind"].startswith("contacts_"):
             from .contacts import contact_operation_allowed
 
@@ -587,7 +606,7 @@ class Jobs:
         allowed = (
             config.send_chats if operation["kind"] in SEND_OPERATIONS else config.mutation_chats
         )
-        if operation["chat_id"] not in allowed:
+        if not operation.get("owner_authorized") and operation["chat_id"] not in allowed:
             raise TeleloomError(
                 "recipient_not_allowed"
                 if operation["kind"] in SEND_OPERATIONS
@@ -653,8 +672,12 @@ class Jobs:
                 )
         return sources
 
-    async def operation_preview(self, profile: str, operation: MessageOperation) -> dict[str, Any]:
+    async def operation_preview(
+        self, profile: str, operation: MessageOperation, owner_authorized: bool = False
+    ) -> dict[str, Any]:
         p = operation.model_dump(mode="json")
+        if owner_authorized:
+            p["owner_authorized"] = True
         self._operation_allowed(profile, p)
         if p["kind"] == "unpin_all":
             p["scope_semantics"] = (
@@ -1311,7 +1334,9 @@ class Jobs:
         if "operation" in p:
             self._operation_allowed(profile, p["operation"])
         else:
-            self._allowed(profile, p["recipients"], p["broadcast"])
+            self._allowed(
+                profile, p["recipients"], p["broadcast"], p.get("owner_authorized", False)
+            )
         entries = self.store.deliveries(job["id"])
         for position, delivery in enumerate(entries):
             if delivery["status"] != "pending":
