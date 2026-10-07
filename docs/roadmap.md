@@ -25,6 +25,7 @@ sourced digest workflows, observed events, media and confirmed mutations.
 | Proxies | One credential-backed proxy per profile; MTProto accepts SOCKS4/SOCKS5/HTTP, Bot API uses its SDK proxy seam | Named proxy catalog, assignment, health checks and bounded failover |
 | AI | Optional Jev classification/field selection; local/Telegram/OpenAI-compatible/Groq transcription paths | Better configuration, capability reporting, provider identity and failure handling |
 | Skills | Connect, read, inbox, digest, send and broadcast | Shorter guidance, distinct new workflows and native client/model validation |
+| Message styling | Typed custom emoji entities in the existing confirmed message workflow | Named emoji collections, bounded MCP selection, a styling skill and later GUI management |
 | Deployment | Docker/Compose and MCPB packaging from the existing wheel | Reproducible VPS/SSH operation, headless provisioning and recovery |
 | Customization | Owner-selected tool exposure and repository developer skill | Personal skills, saved tools and reviewed local code extensions |
 
@@ -46,6 +47,7 @@ flowchart TD
     M2 --> M3["M3: personal skills and reusable MCP tools"]
     M1 --> SKILLS["Improve and validate existing skills"]
     SKILLS --> M3
+    M3 --> EMOJI["Named emoji collections and message styling"]
     M1 --> M4["M4: providers and client compatibility"]
     M1 --> SSH["Early pilot: remote stdio over SSH"]
     SSH --> M5["M5: supported VPS operation and recovery"]
@@ -127,10 +129,44 @@ Candidate additions have distinct outputs:
   actions across owner-selected project chats, with contrary evidence and sources.
 - **`teleloom-customize`**: turn a repeated request into a reviewed personal skill
   or tool, then check that it is callable in the selected client.
+- **`teleloom-style`**: draft a message using owner-selected custom emoji
+  collections, preserving its text, formatting and exact confirmation plan.
 
 Extract overlapping instructions from existing skills when introducing these.
 Add each candidate only with its complete workflow; another name for the same
 read or digest sequence is not an increase in capability.
+
+### Custom emoji collections and message styling
+
+[Proposal #15](https://github.com/starsinc1708/teleloom/issues/15) adds named
+collections so the owner can ask: “Use only the IT and monochrome sets for this
+announcement.” Start with an owner-reviewed local catalog and bounded MCP
+list/search/resolve over selected collections. Load relevant entries into the
+agent's context; a large catalog should not accompany every message. Explicit
+selection for a request overrides owner defaults.
+
+Use the [reference catalog](https://github.com/Zulut30/premium-telegram-emoji/blob/main/references/emoji-catalog.md)
+as a format example: thematic sections, pack links, emoji IDs, descriptions and
+Unicode fallbacks. Store IDs as strings, retain source/revision and scope keys to
+their collection because names can repeat. Allow reviewed imports from files or
+`t.me/addemoji` packs, plus personal subsets and tags; this proposal does not
+automatically copy the complete third-party catalog.
+
+Reuse the existing typed `custom_emoji` entities and delivery adapters. The
+candidate styling skill resolves semantic matches without inventing IDs, preserves
+UTF-16 spans and other entities, and shows exact IDs and fallback text in the
+immutable preview. Freeze that selection before confirmation: later catalog
+updates cannot change a plan. Eligibility depends on the sender, backend and chat;
+report unavailable entries and apply only the owner-selected fallback behavior.
+[Telegram custom emoji](https://core.telegram.org/api/custom-emoji),
+[Bot API formatting rules](https://core.telegram.org/bots/api#formatting-options).
+
+Later GUI work adds a searchable preview, a collection editor, import/export,
+and defaults per profile/chat or task. Choosing a collection grants no delivery
+permission. The first implementation issue must check duplicate/unknown IDs,
+string fidelity, emoji graphemes and UTF-16 offsets, spoilers/links, capability
+failures and unchanged confirmation/receipt behavior. Record native/live rendering
+separately; a local catalog or fake API check does not prove Telegram eligibility.
 
 ### From a conversation to a reusable capability
 
