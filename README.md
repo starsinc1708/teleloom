@@ -42,7 +42,7 @@ User accounts need your own Telegram API ID/hash from [my.telegram.org](https://
 Bots use a bot token. Credentials are entered locally, outside an agent conversation.
 
 ```sh
-git clone --single-branch https://github.com/starsinc1708/teleloom.git
+git clone --branch v0.5.0 --single-branch https://github.com/starsinc1708/teleloom.git
 cd teleloom
 uv sync --frozen
 uv run teleloom init
@@ -66,20 +66,6 @@ Merge the printed fragment into the existing client configuration, then reconnec
 MCP. Use `claude`, `opencode` (v2), `opencode-v1`, `hermes` or `pi` for other clients.
 Existing skills are preserved unless you explicitly request replacement.
 [Client paths and discovery checks](docs/clients.md).
-
-For OpenCode 2 or Hermes, register MCP through the installed client's CLI:
-
-```sh
-uv run teleloom config client --client opencode --install
-uv run teleloom skills install --client opencode
-uv run teleloom config client --client hermes --install
-uv run teleloom skills install --client hermes
-```
-
-Choose the pair for your client, then reconnect MCP. `--install` is available in
-the current source checkout; v0.5.0 only prints fragments. An identical connection
-is preserved; a conflicting `teleloom` entry requires manual review. Hermes skills
-follow `hermes config path`, including its active profile and `HERMES_HOME`.
 
 Try this first:
 

@@ -1,32 +1,9 @@
 # Agent clients
 
-Run `teleloom config client --client CLIENT` from the installed environment to print
-a fragment, then merge it into the host configuration. Generated commands use the
-installed interpreter and `-m teleloom mcp`; the bridge loads credentials itself.
-Printing never registers MCP. Explicit `--install` supports OpenCode 2 and Hermes
-through their native CLIs; other clients still require a manual merge.
-
-From a checkout containing native installation support (v0.5.0 only prints fragments),
-choose the command pair for your client:
-
-```sh
-uv run teleloom config client --client opencode --install
-uv run teleloom skills install --client opencode
-uv run teleloom config client --client hermes --install
-uv run teleloom skills install --client hermes
-```
-
-The client CLI must be on PATH. OpenCode runs `mcp add teleloom --global`; Hermes
-runs `mcp add teleloom --command ... --env ... --args ...`. Both receive the same
-interpreter and `TELELOOM_DATA_DIR` as the printed fragment, without shell execution.
-Existing settings and other servers are left to the native client's merge logic.
-An identical active connection returns `already_configured` without rewriting it,
-retaining client-specific options. A different command, arguments, environment or
-disabled connection is a conflict and requires manual review; there is no automatic
-replacement. After `mcp add`, Teleloom checks that the requested active entry was
-saved. Missing CLI, command failure, cancellation or unreadable configuration is an
-error, never installation success. Registration alone does not establish live
-Telegram connectivity; reconnect and use the discovery checks below.
+Run `teleloom config client --client CLIENT` from the installed environment, then merge
+the result into the host configuration. Generated commands use the installed
+interpreter and `-m teleloom mcp`; the bridge loads credentials itself. Installation
+does not automatically modify another application's configuration.
 
 On Windows, generated fragments use the sibling pythonw.exe when available, so
 GUI clients can start the stdio bridge without opening a console. Existing
@@ -40,27 +17,18 @@ commands and interactive CLI/auth invocations keep their normal interpreter.
 | Claude Desktop | JSON `mcpServers.teleloom` | Skill loading depends on host; use workflow instructions manually if unavailable |
 | OpenCode 2 | `mcp.servers.teleloom`, type local, command array | `--client opencode` → `~/.config/opencode/skills` |
 | OpenCode 1 | `mcp.teleloom`, with `enabled: true` | `--client opencode-v1` → `~/.config/opencode/skills` |
-| Hermes | YAML-compatible JSON `mcp_servers.teleloom` fragment | `--client hermes` → `skills/` beside `hermes config path` |
+| Hermes | YAML-compatible JSON `mcp_servers.teleloom` fragment | `--client hermes` → `~/.hermes/skills` |
 | Pi | JSON `mcpServers.teleloom` in `~/.pi/agent/mcp.json` | `--client pi` → `~/.pi/agent/skills` |
 | Other hosts | stdio command `teleloom mcp` | `--target PATH`, or load instructions manually |
 
 Public v0.5.0 includes the OpenCode 2, explicit v1 and Pi targets.
 
 Merge only the `teleloom` server entry into existing configurations; keep unrelated
-settings and servers. OpenCode uses `~/.config/opencode/opencode.json(c)` (or a project
-`opencode.json(c)`), Hermes resolves its configuration through `hermes config path`,
-and Claude Desktop uses
+settings and servers. OpenCode uses `~/.config/opencode/opencode.json` (or a project
+`opencode.json`), Hermes uses `~/.hermes/config.yaml`, and Claude Desktop uses
 `%APPDATA%/Claude/claude_desktop_config.json` on Windows. For Claude Code, pass the
 single server object, without its `mcpServers` wrapper, to
 `claude mcp add-json --scope user teleloom JSON`.
-
-Hermes resolves `HERMES_HOME`, its platform-specific installation home and the
-active profile itself. Teleloom installs skills beside the returned config, such
-as `%LOCALAPPDATA%/hermes/skills` on the reported Windows installation or
-`HERMES_HOME/profiles/work/skills` for an active named profile. It does not fall
-back to a guessed `~/.hermes` directory if discovery fails. Explicit `--target PATH`
-takes priority and skips client discovery. Existing skills remain protected unless
-`--force` is supplied.
 
 Check native discovery without a model call:
 
