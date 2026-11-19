@@ -1,3 +1,4 @@
+import html
 import json
 import subprocess
 import sys
@@ -404,6 +405,14 @@ async def test_native_failure_and_unsupported_clients_fail_closed(tmp_path, monk
                 "/control/clients", params=[("review", "1"), ("client", "codex")]
             )
             assert "export only" in page.text and "mcp_servers" in page.text
+
+            v1_page = await client.get(
+                "/control/clients", params={"client": "opencode-v1", "review": "1"}
+            )
+            exported = html.unescape(
+                v1_page.text.split("<h3>Export</h3><pre><code>", 1)[1].split("</code>", 1)[0]
+            )
+            assert json.loads(exported)["mcp"]["teleloom"]["enabled"] is True
             csrf_page = await client.get(
                 "/control/clients",
                 params=[

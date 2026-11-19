@@ -237,16 +237,17 @@ async def test_send_page_needs_the_owner_session_and_previews_only_the_typed_tar
                 "csrf": csrf,
                 "profile": "personal",
                 "chat_id": "-100123",
-                "text": "Hello <b>owner</b>",
+                "text": "\nHello <b>owner</b>",
             },
         )
         assert accepted.status_code == 303, accepted.text
         assert accepted.headers["location"].startswith("/control/send/plan/")
-        assert owner.calls == [("preview", "personal", "-100123", "Hello <b>owner</b>")]
+        assert owner.calls == [("preview", "personal", "-100123", "\nHello <b>owner</b>")]
 
         review = await client.get(accepted.headers["location"])
         assert review.status_code == 200
-        assert "Engineering" in review.text and "Hello &lt;b&gt;owner&lt;/b&gt;" in review.text
+        assert "Engineering" in review.text
+        assert "<pre><span>\nHello &lt;b&gt;owner&lt;/b&gt;</span></pre>" in review.text
         assert "user · 42 · owner" in review.text  # exact sender identity, not a request field
         assert "Confirm and send this exact message" in review.text
         assert hash_of(review.text)

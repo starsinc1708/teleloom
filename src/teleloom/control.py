@@ -885,8 +885,9 @@ class Control:
 
         try:
             await self.lifecycle.stop(settings)
-        except TeleloomError as error:
-            return fail(f"stop failed ({error.code}: {error.message}); nothing was written.")
+        except Exception as exception:  # noqa: BLE001 - normalize shutdown transport failures
+            failure = _failure(exception)
+            return fail(f"stop failed ({failure.code}: {failure.message}); nothing was written.")
         value["phase"] = "stopped"
         save_record(settings, value)
         owner = ownership(settings)
@@ -897,7 +898,14 @@ class Control:
                 "owner_busy: another login or configuration change started; nothing was written.",
             )
         try:
-            fresh_raw, _ = read_config(settings)
+            try:
+                fresh_raw, _ = read_config(settings)
+            except (OSError, TeleloomError) as exception:
+                failure = _failure(exception)
+                return fail(
+                    f"Cannot reread configuration after stopping ({failure.code}). "
+                    "Review config.json and run teleloom serve."
+                )
             expected = str(value["revision"])
             if not hmac.compare_digest(revision(fresh_raw), expected):
                 return fail("stale: configuration changed while stopping; nothing was written.")
@@ -966,7 +974,17 @@ class Control:
         return self._render(500, message, csrf)
 
     def _render(self, status: int, message: str, csrf: str) -> Response:
-        raw, data = read_config(self.settings)
+        try:
+            raw, data = read_config(self.settings)
+        except (OSError, TeleloomError):
+            return HTMLResponse(
+                '<!doctype html><html lang="en"><meta charset="utf-8">'
+                "<title>Owner configuration · teleloom</title>"
+                "<h1>Cannot read owner configuration</h1>"
+                f'<p role="alert">{_esc(message)}</p><a href="/control">Reload control</a></html>',
+                status_code=status,
+                headers=self._headers(),
+            )
         current = exposure(data)
         return HTMLResponse(
             _control_html(

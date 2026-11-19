@@ -169,6 +169,17 @@ async def test_create_assign_two_profiles_apply_and_no_plaintext(tmp_path, monke
         )
         assert checked.status_code == 200 and "Route check: unavailable" in checked.text
 
+        before_edit = digest(tmp_path)
+        edit_review = await review(
+            http, [*{**ENDPOINT, "protocol": "socks4"}.items(), ("review", "1")]
+        )
+        assert "affects profiles: personal, work" in edit_review.text
+        incompatible = await apply(
+            http, instance, before_edit, **{**ENDPOINT, "protocol": "socks4"}
+        )
+        assert incompatible.status_code == 422 and "invalid_proxy" in incompatible.text
+        assert digest(tmp_path) == before_edit
+
     raw = (tmp_path / "config.json").read_text(encoding="utf-8")
     data = json.loads(raw)
     assert data["proxies"]["corp"] == {"protocol": "http", "host": "127.0.0.1", "port": 8080}

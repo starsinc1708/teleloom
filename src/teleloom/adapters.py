@@ -128,6 +128,24 @@ class Adapter(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def named_proxy_credentials(secret: str, protocol: str) -> tuple[str, str]:
+    try:
+        stored = json.loads(secret) if secret else {}
+    except ValueError:
+        stored = None
+    if not isinstance(stored, dict) or any(
+        not isinstance(stored.get(field, ""), str) for field in ("username", "password")
+    ):
+        raise TeleloomError("invalid_proxy", "The named proxy credential could not be read.")
+    username = stored.get("username", "")
+    password = stored.get("password", "")
+    if password and (not username or protocol == "socks4"):
+        raise TeleloomError(
+            "invalid_proxy", "The named proxy credential is invalid for its protocol."
+        )
+    return username, password
+
+
 def proxy_url(
     profile_id: str,
     profile: Profile,
@@ -148,20 +166,7 @@ def proxy_url(
             f"Named proxy '{profile.proxy}' is not configured; refusing a direct connection.",
         )
     secret = credentials.get("proxy", profile.proxy) or ""
-    try:
-        stored = json.loads(secret) if secret else {}
-    except ValueError:
-        stored = None
-    if not isinstance(stored, dict) or any(
-        not isinstance(stored.get(field, ""), str) for field in ("username", "password")
-    ):
-        raise TeleloomError("invalid_proxy", "The named proxy credential could not be read.")
-    username = stored.get("username", "")
-    password = stored.get("password", "")
-    if password and (not username or endpoint.protocol == "socks4"):
-        raise TeleloomError(
-            "invalid_proxy", "The named proxy credential is invalid for its protocol."
-        )
+    username, password = named_proxy_credentials(secret, endpoint.protocol)
     auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username else ""
     return f"{endpoint.protocol}://{auth}{endpoint.host}:{endpoint.port}"
 

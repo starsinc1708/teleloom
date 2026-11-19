@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
+from .adapters import named_proxy_credentials
 from .config import ProxyEndpoint, Settings, validate_proxy_name
 from .control import Change, identity_mismatches, read_config, revision, write_config
 from .models import TeleloomError
@@ -394,6 +395,9 @@ async def apply(instance: Any, request: Request) -> Response:
             proposed = validated(
                 data, action=action, form=form, secrets=secrets, credential=credential
             )
+            if action == "endpoint" and credential is None:
+                protocol = proposed["proxies"][subject]["protocol"]
+                named_proxy_credentials(secrets.get(CREDENTIALS, subject) or "", protocol)
     except TeleloomError as error:
         return HTMLResponse(
             _html(

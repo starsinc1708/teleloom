@@ -176,8 +176,8 @@ def export_fragment(client: str, entry: dict[str, Any]) -> str:
         if client == "opencode-v1":
             local["enabled"] = True
         servers = {"teleloom": local}
-        shape = servers if client == "opencode" else {"mcp": {"servers": servers}}
-        return json.dumps(shape, indent=2)
+        shape = {"servers": servers} if client == "opencode" else servers
+        return json.dumps({"mcp": shape}, indent=2)
     key = "mcpServers" if client in {"claude", "pi"} else "mcp_servers"
     return json.dumps({key: {"teleloom": entry}}, indent=2)
 
@@ -204,7 +204,14 @@ def _client_paths(client: str) -> list[Path]:
 def _entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any]:
     """Compare the existing entry by field; foreign values stay behind their key names."""
     if not isinstance(saved, dict):
-        return {"state": "absent", "environment": {}, "preserved": [], "blocking": []}
+        return {
+            "state": "different",
+            "command": "unreadable",
+            "args": "unreadable",
+            "environment": {},
+            "preserved": [],
+            "blocking": ["entry is not a mapping"],
+        }
     env_key = "environment" if client == "opencode" else "env"
     command = saved.get("command")
     if client == "opencode":
@@ -213,6 +220,8 @@ def _entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any
     else:
         current, current_args = command, saved.get("args")
     blocking: list[str] = []
+    if client == "opencode" and saved.get("type") != "local":
+        blocking.append("connection type is not local")
     if current != entry["command"]:
         blocking.append("command differs")
     if current_args != entry["args"]:
@@ -270,10 +279,12 @@ def _existing(client: str, entry: dict[str, Any]) -> dict[str, Any]:
             fingerprint.update(path.read_bytes())
         except OSError:
             fingerprint.update(b"<unreadable>")
+    diffs = [_entry_diff(client, entry, saved) for saved in entries]
+    existing_diff = next((item for item in diffs if item["blocking"]), diffs[0] if diffs else None)
     public: dict[str, Any] = {
         "state": "present" if entries else "absent",
         "paths": [str(path) for path in paths],
-        "diff": _entry_diff(client, entry, entries[0]) if entries else None,
+        "diff": existing_diff,
         "fingerprint": fingerprint.hexdigest(),
     }
     if entries:

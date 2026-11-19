@@ -918,37 +918,10 @@ def client_config(client: Client = Client.codex, install: bool = False) -> None:
     """Print a mergeable fragment; --install registers OpenCode 2 or Hermes using their CLI."""
     settings = Settings.load()
     entry = control_clients.connection_entry(settings)
-    command, args = entry["command"], entry["args"]
     if install:
         typer.echo(json.dumps(install_client(client, entry)))
         return
-    if client == Client.codex:
-        typer.echo(
-            "[mcp_servers.teleloom]\ncommand = "
-            + json.dumps(command)
-            + "\nargs = "
-            + json.dumps(args)
-            + "\n[mcp_servers.teleloom.env]\nTELELOOM_DATA_DIR = "
-            + json.dumps(str(settings.data_dir))
-        )
-    elif client in {Client.opencode, Client.opencode_v1}:
-        local: dict[str, Any] = {
-            "type": "local",
-            "command": [command, *args],
-            "environment": entry["env"],
-        }
-        if client == Client.opencode_v1:
-            local["enabled"] = True
-        servers = {"teleloom": local}
-        typer.echo(
-            json.dumps(
-                {"mcp": {"servers": servers} if client == Client.opencode else servers},
-                indent=2,
-            )
-        )
-    else:
-        key = "mcpServers" if client in {Client.claude, Client.pi} else "mcp_servers"
-        typer.echo(json.dumps({key: {"teleloom": entry}}, indent=2))
+    typer.echo(control_clients.export_fragment(client.value, entry))
 
 
 @cache_app.command("prune")

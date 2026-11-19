@@ -330,9 +330,17 @@ def test_stale_record_is_abandoned_and_cross_process_lock_is_exclusive(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_failed_stop_start_and_write_report_honest_state(tmp_path):
+@pytest.mark.parametrize("raw_transport_error", [False, True])
+async def test_failed_stop_and_start_report_honest_state(tmp_path, raw_transport_error):
     path = config_file(tmp_path)
-    stop_failed = FakeLifecycle(fail_stop=True)
+
+    class StopFailure(FakeLifecycle):
+        async def stop(self, settings):
+            if raw_transport_error:
+                raise httpx.ReadTimeout("internal detail")
+            await super().stop(settings)
+
+    stop_failed = StopFailure(fail_stop=True)
     instance = make_control(tmp_path, stop_failed)
     async with await open_page(tmp_path, instance) as client:
         await login(client, instance)
@@ -342,6 +350,8 @@ async def test_failed_stop_start_and_write_report_honest_state(tmp_path):
         assert json.loads(path.read_text()) == BASE
         stored = control.record(instance.settings) or {}
         assert stored["phase"] == "failed" and "nothing was written" in stored["reason"]
+        assert "internal detail" not in response.text
+        assert control.live_transition(instance.settings) is None
 
     start_failed = FakeLifecycle(fail_start=True)
     instance = make_control(tmp_path, start_failed)

@@ -338,6 +338,12 @@ async def test_unsupported_endpoint_model_and_absent_model_refuse_before_stop(
             assert blank.status_code == 422 and "invalid_model" in blank.text
             unknown = await post_apply(client, {**base, "openai_endpoint": "", "profile": "nope"})
             assert unknown.status_code == 422 and "profile_not_found" in unknown.text
+            bot = await post_apply(
+                client, {**base, "openai_endpoint": "", "profile": "ops", "provider": "telegram"}
+            )
+            assert bot.status_code == 422 and "requires a user profile" in bot.text
+            page = await client.get("/control/engines", params={"profile": "personal"})
+            assert "<dt>External upload authorized chats</dt><dd>10</dd>" in page.text
     finally:
         instance.close()
     assert lifecycle.stopped == 0 and path.read_bytes() == original

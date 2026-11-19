@@ -10,13 +10,13 @@ import hmac
 import html
 import json
 import os
-from typing import Any
+from typing import Any, cast
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from .attachments import _installed, _local_model
-from .config import Settings, TranscriptionConfig
+from .config import Profile, Settings, TranscriptionConfig
 from .control import Change, identity_mismatches, read_config, revision, write_config
 from .models import TeleloomError
 from .secrets import Secrets
@@ -159,6 +159,8 @@ def validated(data: dict[str, Any], name: str, tokens: dict[str, Any]) -> dict[s
         raise TeleloomError(
             "invalid_provider", "Choose one of the existing transcription providers."
         )
+    if provider == "telegram" and data["profiles"][name]["kind"] != "user":
+        raise TeleloomError("invalid_provider", "Telegram transcription requires a user profile.")
     jev_model = str(tokens.get("jev_model") or "").strip()
     if not 1 <= len(jev_model) <= 200:
         raise TeleloomError(
@@ -475,12 +477,23 @@ def _html(
     engine = jev(data, credentials)
     states = availability(data, name, credentials) if name else {}
     if name:
+        grants = Profile.model_validate(data["profiles"][name]).grants()
+        permissions = "".join(
+            f"<dt>{label}</dt><dd>{_esc(', '.join(cast(list[str], grants[key])) or 'No chats')}</dd>"
+            for key, label in (
+                ("ai", "Jev authorized chats"),
+                ("transcription", "Transcription authorized chats"),
+                ("transcription_external", "External upload authorized chats"),
+            )
+        )
         report = (
             "<dl>"
             + _state("Jev", engine)
             + "".join(
                 _state(f"transcription / {provider}", states[provider]) for provider in PROVIDERS
             )
+            + "</dl><h3>Effective grants</h3><dl>"
+            + permissions
             + "</dl>"
         )
     else:

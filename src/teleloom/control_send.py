@@ -283,7 +283,7 @@ def _review(instance: Any, csrf: str, profile: str, plan: dict[str, Any]) -> Res
         ("Sender", _sender(payload, profile)),
         ("Recipient", target),
         ("Format", "plain text"),
-        ("Message", f"<pre>{_esc(payload['text'])}</pre>"),
+        ("Message", f"<pre><span>{_esc(payload['text'])}</span></pre>"),
         ("Plan ID", f"<code>{_esc(plan['id'])}</code>"),
         ("Plan hash", f"<code>{_esc(plan['hash'])}</code>"),
         (
