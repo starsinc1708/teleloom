@@ -12,15 +12,17 @@ CREDENTIAL_ERRORS = frozenset(
     {"credentials_missing", "credentials_unavailable", "credentials_invalid", "auth_required"}
 )
 
-# Explicit allowlist: transcription engine/model detail never reaches the browser.
+# Explicit allowlist: engine status below projects only safe fields.
 CAPABILITY_KEYS = (
     "read_policy",
     "telegram_history",
     "explicit_message_lookup",
     "telegram_global_search",
+    "exact_sender_search",
     "local_retrieval",
     "public_chat_search",
     "message_context",
+    "rich_evidence",
     "telegram_unread",
     "local_inbox",
     "polling_enabled",
@@ -30,7 +32,13 @@ CAPABILITY_KEYS = (
     "channel_comments",
     "pinned_posts",
     "selected_attachments",
+    "attachment_processing",
     "events",
+    "event_delivery",
+    "transcription",
+    "transcription_providers",
+    "media",
+    "management",
     "send",
     "broadcast",
 )
@@ -56,19 +64,41 @@ def profiles_data(settings: Settings, runtime: Runtime) -> dict[str, Any]:
             state = "error"
         else:
             state = "connected" if item["connected"] else "not_opened"
+        capabilities = item["capabilities"]
+        engines = capabilities["transcription_engines"]
         rows.append(
             {
                 "id": item["id"],
                 "kind": item["kind"],
                 "backend": item["backend"],
                 "identity": item["identity"],
+                "proxy": item["proxy"],
                 "state": state,
                 "error": error,
                 "next_action": failure(error, "connect", profile)["next_action"] if error else None,
-                "read_policy": item["capabilities"]["read_policy"],
+                "read_policy": capabilities["read_policy"],
                 "grants": item["grants"],
-                "capabilities": {key: item["capabilities"][key] for key in CAPABILITY_KEYS},
-                "limits": [BOT_LIMIT] if item["kind"] == "bot" else [],
+                "capabilities": {
+                    **{key: capabilities[key] for key in CAPABILITY_KEYS},
+                    "transcription_engines": {
+                        "default_provider": engines["default_provider"],
+                        "providers": {
+                            name: {
+                                key: engine[key]
+                                for key in ("available", "reason", "external_upload")
+                                if key in engine
+                            }
+                            for name, engine in engines["providers"].items()
+                        },
+                    },
+                },
+                "limits": (
+                    [BOT_LIMIT]
+                    if item["backend"] == "bot_api"
+                    else ["Bot history uses saved updates. Exact message lookup uses MTProto."]
+                    if item["kind"] == "bot"
+                    else []
+                ),
             }
         )
     return {"tool_exposure": scope["tool_exposure"], "profiles": rows}
@@ -137,16 +167,31 @@ async def probe(
     return view
 
 
+_TOOL_CAPABILITIES = {
+    "messages_get": "message_context",
+    "messages_search": "message_context",
+    "messages_search_global": "telegram_global_search",
+    "chats_search": "public_chat_search",
+    "comments_get": "channel_comments",
+    "context_get": "message_context",
+    "folders_list": "folder_membership",
+    "folders_snapshot": "folder_membership",
+    "folder_members": "folder_membership",
+    "topics_list": "topics",
+    "topic_history": "topics",
+    "thread_get": "threads",
+    "messages_pinned": "pinned_posts",
+}
+
+
 def applicable(profile: dict[str, Any] | None, tool: dict[str, Any]) -> str | None:
-    """Explain a backend limit for this tool without pretending the tool is broken."""
-    if profile is None or not tool["needs_profile"]:
+    if profile is None or (key := _TOOL_CAPABILITIES.get(tool["name"])) is None:
         return None
-    if profile["kind"] == "bot" and tool["needs_chat"]:
-        return "Bot profile: saved updates only, so live history reads are unavailable."
-    if profile["state"] == "not_opened":
-        return "Connection is not open yet; running this tool would open it."
-    if profile["state"] in {"credential", "error"}:
-        return f"Profile is unavailable ({profile['error']}); fix it before this tool can run."
+    value = profile["capabilities"][key]
+    if value is False:
+        return f"{_label(key)} is unavailable for this backend."
+    if value == "saved_updates_only":
+        return "Saved updates only. Coverage is limited to updates recorded by this owner."
     return None
 
 
@@ -201,7 +246,7 @@ enumerates dialogs, signs in or calls AI.</footer>{tag}
 </main></body></html>"""
 
 
-def _probe_form(profiles: list[dict[str, Any]], csrf: str, nonce: str | None) -> str:
+def _probe_form(profiles: list[dict[str, Any]], csrf: str) -> str:
     if not profiles:
         return (
             '<p class="small">Add a profile with teleloom auth user or auth bot to run a probe.</p>'
@@ -215,11 +260,11 @@ def _probe_form(profiles: list[dict[str, Any]], csrf: str, nonce: str | None) ->
         for value in (1, 3, 5, 10)
     )
     return f"""<section aria-labelledby="probe"><h2 id="probe">One explicit connection probe</h2>
-<p>Runs a single bounded read of one message in a chat this profile may read. It returns the
-timestamp only, never message text, and never retries.</p>
+<p>Checks for at most one message in a chat this profile may read. The result shows the
+number of messages found and timing. The probe never returns message content or retries.</p>
 <form method="post" action="/ui/probe">
 <label for="probe-profile">Profile</label>
-<select id="probe-profile" name="profile_id" required>{options}</select>
+<select id="probe-profile" name="profile_id" required><option value="">Select a profile</option>{options}</select>
 <label for="probe-chat">Chat ID (canonical numeric)</label>
 <input id="probe-chat" name="chat_id" required inputmode="numeric" autocomplete="off"
  aria-describedby="probe-chat-hint">
@@ -233,9 +278,52 @@ profile's read policy.</span>
 </form></section>"""
 
 
-PROBE_SCRIPT = """document.querySelector('[data-probe]').form.addEventListener('submit',()=>{
-const b=document.querySelector('[data-probe]');b.disabled=true;b.textContent='Running one bounded read…';
-document.querySelector('#probe-status').textContent='Running one bounded read; this page waits for the result.';});"""
+PROBE_SCRIPT = """document.addEventListener('submit',async (event)=>{
+const form=event.target;
+const button=form.querySelector('[data-probe]');
+if(!button)return;
+event.preventDefault();
+if(button.disabled)return;
+const status=form.querySelector('#probe-status');
+button.disabled=true;
+status.textContent='Running one bounded read…';
+try {
+    const response=await fetch(form.action,{method:'POST',body:new URLSearchParams(new FormData(form))});
+    if(!response.ok)throw new Error();
+    const page=new DOMParser().parseFromString(await response.text(),'text/html');
+    if(!page.querySelector('#probe-result'))throw new Error();
+    document.querySelector('main').replaceChildren(...page.querySelector('main').childNodes);
+    document.querySelector('#probe-result').focus();
+} catch {
+    status.textContent='Unable to display the probe result. Reload to check your panel session.';
+} finally {
+    button.disabled=false;
+}});"""
+
+
+def _label(key: str) -> str:
+    return key.replace("_", " ").capitalize()
+
+
+def _fields(fields: dict[str, Any]) -> str:
+    return (
+        "<dl>"
+        + "".join(
+            f"<dt>{_esc(_label(key))}</dt><dd>{_field_value(value)}</dd>"
+            for key, value in fields.items()
+        )
+        + "</dl>"
+    )
+
+
+def _field_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return _fields(value)
+    if isinstance(value, list):
+        return ", ".join(_field_value(item) for item in value) or "None"
+    if isinstance(value, bool):
+        return "Available" if value else "Unavailable"
+    return _esc(str(value).replace("_", " ") if value == "saved_updates_only" else value)
 
 
 def profiles_html(
@@ -270,6 +358,7 @@ def profiles_html(
         f"<dt>Account ID</dt><dd><code>{_esc(item['identity'].get('id', 'unknown'))}</code></dd>"
         f"<dt>Username</dt><dd>{_esc(item['identity'].get('username') or 'not reported')}</dd>"
         f"<dt>Display name</dt><dd>{_esc(item['identity'].get('name') or 'not reported')}</dd>"
+        f"<dt>Connection route</dt><dd>{_esc(item['proxy']['name'])}</dd>"
         f"<dt>Read policy</dt><dd>{_esc(item['read_policy']['mode'])}"
         + (
             " · " + ", ".join(_esc(chat) for chat in item["read_policy"]["chat_ids"])
@@ -277,16 +366,14 @@ def profiles_html(
             else ""
         )
         + "</dd>"
-        "<dt>Grants</dt><dd>"
-        + ", ".join(
-            f"{_esc(grant)}: {_esc(len(chats))} chat(s)" for grant, chats in item["grants"].items()
-        )
-        + "</dd>"
-        "<dt>Saved coverage</dt><dd>"
-        + _esc(item["capabilities"]["message_context"])
-        + "</dd>"
         + "".join(f"<dt>Limit</dt><dd>{_esc(limit)}</dd>" for limit in item["limits"])
-        + '</dl><p class="small"><a href="/ui/tools?profile='
+        + "</dl><h3>Grants</h3>"
+        + _fields({grant: value for grant, value in item["grants"].items() if grant != "read"})
+        + "<details><summary>Backend capabilities</summary>"
+        + _fields(
+            {key: value for key, value in item["capabilities"].items() if key != "read_policy"}
+        )
+        + '</details><p class="small"><a href="/ui/tools?profile='
         + _esc(item["id"])
         + '">Tool availability for this profile</a></p></section>'
         for item in profiles
@@ -305,7 +392,7 @@ def profiles_html(
         )
         + "</p>"
         + rows
-        + _probe_form(profiles, csrf, nonce)
+        + _probe_form(profiles, csrf)
     )
     if result is not None:
         body = _probe_result(result) + body
@@ -319,11 +406,12 @@ def profiles_html(
 
 
 def _probe_result(result: dict[str, Any]) -> str:
+    returned = result["returned"]
+    count = "—" if returned is None else f"{returned} message{'s' if returned != 1 else ''}"
     if result["status"] == "ok":
         detail = (
             f'<p class="state" data-state="ok" role="status">Selected read succeeded in '
-            f"phase <code>{_esc(result['phase'])}</code>. One message was returned as a "
-            f"timestamp; no content is shown.</p>"
+            f"phase <code>{_esc(result['phase'])}</code>. Returned {_esc(count)}.</p>"
         )
     elif result["error"]:
         detail = (
@@ -339,11 +427,12 @@ def _probe_result(result: dict[str, Any]) -> str:
         for phase, value in result["timings_seconds"].items()
     )
     return (
-        '<section aria-labelledby="probe-result"><h2 id="probe-result">Last probe result</h2>'
+        '<section aria-labelledby="probe-result"><h2 id="probe-result" tabindex="-1">Last probe result</h2>'
         + detail
         + "<dl>"
         f"<dt>Profile</dt><dd><code>{_esc(result['profile_id'] or 'none')}</code></dd>"
         f"<dt>Chat</dt><dd><code>{_esc(result['chat_id'] or 'none')}</code></dd>"
+        f"<dt>Returned</dt><dd>{_esc(count)}</dd>"
         f"<dt>Timeout</dt><dd>{_esc(result['timeout_seconds'])} s</dd>"
         f"<dt>Logical requests</dt><dd>connect {_esc(result['logical_requests']['connect'])}, "
         f"read {_esc(result['logical_requests']['read'])}</dd>"
@@ -383,11 +472,6 @@ def tools_html(
             if tool[flag]:
                 badges.append(f'<span class="badge">{label}</span>')
         note = applicable(profile, tool)
-        if not tool["exposed"]:
-            note = (
-                "Hidden by the owner's tool exposure: the MCP server does not register it. "
-                "The panel cannot change exposure."
-            )
         rows.append(
             f"<tr><td><code>{_esc(tool['name'])}</code></td>"
             f"<td>{''.join(badges)}</td>"
@@ -397,7 +481,8 @@ def tools_html(
         )
     table = (
         '<table><caption class="small">Availability, chat permission and backend notes '
-        "are listed separately.</caption><thead><tr><th>Tool</th><th>Availability</th>"
+        "are shown separately. Hidden by the owner&#x27;s tool exposure means the tool is absent from MCP."
+        "</caption><thead><tr><th>Tool</th><th>Availability</th>"
         "<th>What it needs</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
         if rows
         else '<p class="state" data-state="empty" role="status">No tool matches this search. '
@@ -431,6 +516,8 @@ def tools_html(
             if profile
             else ""
         )
+        + '<p class="small">A chat permission badge identifies a required chat argument. '
+        "The profile's read policy and operation grants still apply when a tool is exposed.</p>"
         + table
     )
     return shell("Tool catalogue", body, csrf)

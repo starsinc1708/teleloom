@@ -6,17 +6,31 @@ paginates with keyset cursors so stable positions survive refreshes and restarts
 """
 
 import html
+import secrets
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
+from .browser_cache import protected_page
 from .models import TeleloomError
 from .runtime import cursor_decode, cursor_encode
 
 JOB_PAGE = 25
 RECEIPT_PAGE = 10
+JOB_KINDS = (
+    "activity",
+    "attachments",
+    "delivery",
+    "events",
+    "evidence",
+    "export",
+    "sync",
+    "transcription",
+    "unread_export",
+)
 
 _JOB_STATES = {
     "queued": ("Queued", "No work has started for this job."),
@@ -27,8 +41,7 @@ _JOB_STATES = {
     "cancelled": ("Cancelled", "This job was cancelled; remaining work was not attempted."),
     "needs_review": (
         "Needs review — outcome unknown",
-        "Telegram may have accepted part of this job. Reconcile it with evidence in "
-        "Telegram; nothing is resent automatically.",
+        "The external service may have accepted part of this job. Check its evidence before retrying.",
     ),
 }
 
@@ -61,9 +74,11 @@ _ERRORS = {
     "mutation_budget_exhausted": (
         "Telegram acknowledged bounded batches with work remaining. Inspect the receipts."
     ),
-    "delivery_unknown": "Telegram accepted a send without an identifiable receipt.",
+    "delivery_unknown": "The send outcome is uncertain. Reconcile it in Telegram.",
     "connection_error": "The owner lost its Telegram connection during this job.",
     "export_cancelled": "This export was cancelled.",
+    "rate_limited": "Telegram requested a wait before the next attempt.",
+    "timeout": "The attempt timed out. Inspect the receipts before taking action.",
 }
 
 _HTTP = {
@@ -84,19 +99,54 @@ def _esc(value: Any) -> str:
 def _stamp(value: Any) -> str:
     """Render a stored UTC epoch or ISO timestamp without inventing one."""
     if isinstance(value, (int, float)) and value > 0:
-        return datetime.fromtimestamp(value, UTC).isoformat(timespec="seconds")
-    if isinstance(value, str) and value:
-        return value
+        try:
+            return datetime.fromtimestamp(value, UTC).isoformat(timespec="seconds")
+        except (OverflowError, OSError, ValueError):
+            pass
+    if isinstance(value, str):
+        try:
+            stamp = datetime.fromisoformat(value)
+            if stamp.tzinfo is not None:
+                return stamp.astimezone(UTC).isoformat()
+        except (OverflowError, ValueError):
+            pass
     return "—"
 
 
 def _error(error: Any) -> tuple[str, str]:
-    code = str(error["code"]) if isinstance(error, dict) and error.get("code") else "error"
-    text = _ERRORS.get(code, "This job recorded an error; inspect the receipts before retrying.")
-    return code, text
+    code = str(error.get("code")) if isinstance(error, dict) else "error"
+    if code in _ERRORS:
+        return code, _ERRORS[code]
+    return "error", "This job recorded an error. Inspect its status and any available receipts."
 
 
-def _layout(panel: Any, title: str, body: str, *, notice: str = "") -> str:
+_LOADING_SCRIPT = """const loading=document.querySelector('#jobs-loading');
+const view=document.querySelector('#job-view');
+function navigate(action){
+    loading.hidden=false;
+    view.setAttribute('aria-busy','true');
+    requestAnimationFrame(()=>requestAnimationFrame(action));
+}
+view.querySelector('.filters')?.addEventListener('submit',(event)=>{
+    event.preventDefault();
+    navigate(()=>event.target.submit());
+});
+view.addEventListener('click',(event)=>{
+    if(event.button!==0||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
+    const link=event.target.closest('a[href^="/ui/jobs"]');
+    if(!link)return;
+    event.preventDefault();
+    navigate(()=>location.assign(link.href));
+});"""
+
+
+def _layout(title: str, body: str, *, notice: str = "", nonce: str | None = None) -> str:
+    loading = (
+        '<p class="state" id="jobs-loading" role="status" hidden>Loading durable job state…</p>'
+        if nonce
+        else ""
+    )
+    script = f'<script nonce="{_esc(nonce)}">{_LOADING_SCRIPT}</script>' if nonce else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_esc(title)} · teleloom</title><style>
@@ -120,31 +170,34 @@ a:focus-visible,button:focus-visible,select:focus-visible{{outline:3px solid #24
 footer{{margin-top:3em;border-top:1px solid #d8d3c7;padding-top:1em}}
 </style></head><body><main><p class="small">teleloom / owner panel</p>
 <nav><a href="/ui">Status</a><a href="/ui/jobs">Jobs</a><a href="/ui/read">Reading</a></nav>
-{notice}<h1>{_esc(title)}</h1>{body}
+{notice}<h1>{_esc(title)}</h1>{loading}<div id="job-view">{body}</div>
 <footer class="small">Read-only inspector. Refreshing this page re-reads durable owner state only;
-it never sends, confirms, resumes or replays an action.</footer></main></body></html>"""
+it never sends, confirms, resumes or replays an action.</footer>{script}</main></body></html>"""
 
 
 def render(panel: Any, request: Request, job_id: str | None) -> HTMLResponse:
     """Render the jobs list or one job's detail for an authenticated owner session."""
-    headers = panel._headers()
     if panel.runtime.worker is None:
         body = (
             '<p class="state" data-state="error" role="alert">Owner unavailable. The local owner '
             "is not running, so this view cannot confirm current policy. Start it with "
             "<code>teleloom ui</code> and try again.</p>"
         )
-        return HTMLResponse(_layout(panel, "Jobs", body), status_code=503, headers=headers)
+        return HTMLResponse(_layout("Jobs", body), status_code=503, headers=panel._headers())
     try:
         body, notice = _detail(panel, request, job_id) if job_id else _list(panel, request)
     except TeleloomError as exc:
         status, text = _HTTP.get(exc.code, (500, "The panel could not read durable job state."))
         body = (
             f'<p class="state" data-state="error" role="alert">{_esc(text)}</p>'
-            f'<p><code>{_esc(exc.code)}</code></p><p><a href="/ui/jobs">Back to jobs</a></p>'
+            f"<p><code>{_esc(exc.code if exc.code in _HTTP else 'error')}</code></p>"
+            '<p><a href="/ui/jobs">Back to jobs</a></p>'
         )
-        return HTMLResponse(_layout(panel, "Jobs", body), status_code=status, headers=headers)
-    return HTMLResponse(_layout(panel, "Jobs", body, notice=notice), headers=headers)
+        return HTMLResponse(_layout("Jobs", body), status_code=status, headers=panel._headers())
+    nonce = secrets.token_urlsafe(16)
+    return protected_page(
+        _layout("Jobs", body, notice=notice, nonce=nonce), panel._headers, nonce=nonce
+    )
 
 
 def _notice(panel: Any, profiles: set[str]) -> str:
@@ -158,7 +211,7 @@ def _notice(panel: Any, profiles: set[str]) -> str:
     )
 
 
-def _options(values: list[str], selected: str | None) -> str:
+def _options(values: list[str] | tuple[str, ...], selected: str | None) -> str:
     return "".join(
         f'<option value="{_esc(value)}"{" selected" if value == selected else ""}>'
         f"{_esc(value)}</option>"
@@ -167,11 +220,10 @@ def _options(values: list[str], selected: str | None) -> str:
 
 
 def _filters(panel: Any, profile: str | None, kind: str | None, status: str | None) -> str:
-    facets = panel.runtime.store.job_facets()
     profiles = sorted(panel.settings.profiles)
     all_profiles = '<option value="">All profiles</option>' + _options(profiles, profile)
-    all_kinds = '<option value="">All types</option>' + _options(facets["kind"], kind)
-    all_states = '<option value="">All states</option>' + _options(facets["status"], status)
+    all_kinds = '<option value="">All types</option>' + _options(JOB_KINDS, kind)
+    all_states = '<option value="">All states</option>' + _options(tuple(_JOB_STATES), status)
     return f"""<form class="filters" method="get" action="/ui/jobs">
 <label>Profile<select name="profile">{all_profiles}</select></label>
 <label>Type<select name="kind">{all_kinds}</select></label>
@@ -200,21 +252,16 @@ def _list(panel: Any, request: Request) -> tuple[str, str]:
     next_cursor = cursor_encode(scope, rows[-1]["seq"]) if more and rows else None
     cells, profiles = [], set()
     for row in rows:
-        profiles.add(row["profile_id"])
         try:
             panel.runtime.jobs.check_panel(row["profile_id"], row)
-        except TeleloomError as exc:
-            cells.append(
-                f"<tr><td>{_esc(_stamp(row.get('created_at')))}</td>"
-                f"<td>{_esc(row['profile_id'])}</td><td>{_esc(row['kind'])}</td>"
-                f'<td colspan="2">Restricted under the current policy '
-                f"(<code>{_esc(exc.code)}</code>)</td><td><code>{_esc(row['id'])}</code></td></tr>"
-            )
+        except TeleloomError:
+            cells.append('<tr><td colspan="6">Restricted under the current policy</td></tr>')
             continue
+        profiles.add(row["profile_id"])
         label, note = _JOB_STATES.get(
             row["status"], ("Unrecognised state", "This state is not part of the known contract.")
         )
-        link = f"/ui/jobs/{_esc(row['id'])}?profile={_esc(row['profile_id'])}"
+        link = f"/ui/jobs/{quote(row['id'], safe='')}?{urlencode({'profile': row['profile_id']})}"
         cells.append(
             f"<tr><td>{_esc(_stamp(row.get('created_at')))}</td>"
             f"<td>{_esc(row['profile_id'])}</td><td>{_esc(row['kind'])}</td>"
@@ -234,19 +281,15 @@ def _list(panel: Any, request: Request) -> tuple[str, str]:
         )
     pager = ""
     if next_cursor:
-        params = [
-            f"{key}={_esc(value)}"
-            for key, value in (("profile", profile), ("kind", kind), ("status", status))
-            if value
-        ]
-        params.append("cursor=" + _esc(next_cursor))
-        pager = f'<p><a href="/ui/jobs?{"&amp;".join(params)}">Next page →</a></p>'
+        params = {key: query[key] for key in ("profile", "kind", "status") if query.get(key)}
+        params["cursor"] = next_cursor
+        pager = f'<p><a href="/ui/jobs?{_esc(urlencode(params))}">Next page →</a></p>'
     body = (
         _filters(panel, profile, kind, status)
         + state
         + (
             '<table><caption class="small">Durable jobs, newest first</caption><thead><tr>'
-            "<th>Created</th><th>Profile</th><th>Type</th><th>State</th><th>Progress</th>"
+            "<th>Created (UTC)</th><th>Profile</th><th>Type</th><th>State</th><th>Progress</th>"
             f"<th>Job</th></tr></thead><tbody>{''.join(cells)}</tbody></table>"
             if rows
             else ""
@@ -269,13 +312,13 @@ def _detail(panel: Any, request: Request, job_id: str) -> tuple[str, str]:
         ("Profile", _esc(job["profile_id"])),
         ("Type", _esc(job["kind"])),
         ("State", _esc(label)),
-        ("Created", _esc(_stamp(job.get("created_at")))),
+        ("Created (UTC)", _esc(_stamp(job.get("created_at")))),
         ("Progress", _esc(job.get("progress", 0))),
     ]
     if job.get("next_run"):
-        detail.append(("Next run", _esc(_stamp(job["next_run"]))))
+        detail.append(("Next run (UTC)", _esc(_stamp(job["next_run"]))))
     body = (
-        f'<p class="state" data-state="{"unknown" if job["status"] == "needs_review" else job["status"]}" '
+        f'<p class="state" data-state="{"unknown" if job["status"] == "needs_review" else _esc(job["status"])}" '
         f'role="status"><strong>{_esc(label)}</strong> — {_esc(note)}</p>'
         "<dl>" + "".join(f"<dt>{key}</dt><dd>{value}</dd>" for key, value in detail) + "</dl>"
     )
@@ -299,7 +342,9 @@ def _target(entry: dict[str, Any]) -> str:
     if isinstance(target, dict):
         if target.get("chat_id"):
             return "chat " + str(target["chat_id"])
-        return str(target.get("scope") or target.get("kind") or "target")
+        if target.get("kind") == "account":
+            scope = target.get("scope")
+            return f"account ({scope})" if scope and scope != "account" else "account"
     return "target"
 
 
@@ -311,7 +356,7 @@ def _receipt_ids(entry: dict[str, Any]) -> list[str]:
     ids = [str(entry["message_id"])] if entry.get("message_id") else []
     for item in items:
         ids.extend(str(id_) for id_ in (item.get("message_ids") or []) if id_)
-    return ids[:20]
+    return list(dict.fromkeys(ids))
 
 
 def _scheduled(entry: dict[str, Any]) -> str | None:
@@ -333,7 +378,10 @@ def _receipts(panel: Any, request: Request, job: dict[str, Any]) -> tuple[str, s
     entries = entries[:RECEIPT_PAGE]
     counts = panel.runtime.store.delivery_counts(job["id"])
     total = sum(counts.values())
-    summary = ", ".join(f"{count} {name}" for name, count in sorted(counts.items()))
+    summary = ", ".join(
+        f"{count} {'acknowledged' if name == 'sent' else name}"
+        for name, count in sorted(counts.items())
+    )
     rows = []
     for position, entry in entries:
         state = str(entry.get("status", "unknown"))
@@ -343,6 +391,8 @@ def _receipts(panel: Any, request: Request, job: dict[str, Any]) -> tuple[str, s
         )
         ids = _receipt_ids(entry)
         scheduled = _scheduled(entry)
+        if scheduled and state == "sent":
+            label, note = "Schedule accepted", "Telegram acknowledged the schedule request."
         parts = ["; ".join(f"<code>{_esc(id_)}</code>" for id_ in ids)]
         if scheduled:
             parts.append(
@@ -367,10 +417,11 @@ def _receipts(panel: Any, request: Request, job: dict[str, Any]) -> tuple[str, s
     body = (
         f"<h2>Targets and receipts</h2>"
         f'<p role="status">{total} target(s): {_esc(summary or "none recorded")}. '
-        f"Showing positions {start + 1}–{start + len(entries)}.</p>"
+        + (f"Showing positions {entries[0][0] + 1}–{entries[-1][0] + 1}." if entries else "")
+        + "</p>"
         + reconciliation
         + (
-            "<table><thead><tr><th>#</th><th>Target</th><th>State</th><th>Attempted</th>"
+            "<table><thead><tr><th>#</th><th>Target</th><th>State</th><th>Attempted (UTC)</th>"
             f"<th>Identities</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
             if entries
             else '<p class="state" data-state="empty" role="status">No targets were recorded '
@@ -379,8 +430,8 @@ def _receipts(panel: Any, request: Request, job: dict[str, Any]) -> tuple[str, s
     )
     pager = ""
     if more and entries:
-        pager = (
-            f'<p><a href="/ui/jobs/{_esc(job["id"])}?profile={_esc(job["profile_id"])}'
-            f'&amp;r={_esc(cursor_encode(scope, entries[-1][0] + 1))}">Next receipts →</a></p>'
+        params = urlencode(
+            {"profile": job["profile_id"], "r": cursor_encode(scope, entries[-1][0] + 1)}
         )
+        pager = f'<p><a href="/ui/jobs/{quote(job["id"], safe="")}?{_esc(params)}">Next receipts →</a></p>'
     return body, pager

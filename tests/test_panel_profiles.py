@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import socket
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
@@ -6,8 +8,10 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 import uvicorn
+from typer.testing import CliRunner
 
-from teleloom.config import Profile, Settings
+from teleloom.cli import app as cli
+from teleloom.config import Profile, Settings, TranscriptionConfig
 from teleloom.daemon import create_application
 from teleloom.panel import Panel
 from teleloom.runtime import Runtime
@@ -38,7 +42,7 @@ class FakeAdapter:
     async def diagnostic_read(self, chat: str) -> int:
         self.reads.append(chat)
         await asyncio.sleep(self.delay)
-        return 1710000000
+        return 1
 
     async def close(self) -> None:
         return None
@@ -54,8 +58,8 @@ def factory(adapters: list[FakeAdapter], delay: float = 0.0):
 
 
 @asynccontextmanager
-async def real_owner(settings: Settings):
-    app = create_application(settings, TOKEN, forbidden)
+async def real_owner(settings: Settings, make=forbidden):
+    app = create_application(settings, TOKEN, make)
     server = uvicorn.Server(
         uvicorn.Config(
             app, host="127.0.0.1", port=settings.port, log_level="critical", access_log=False
@@ -107,6 +111,9 @@ def two_profiles(**overrides) -> dict[str, Profile]:
             read_mode="selected",
             read_chats=["111"],
             send_chats=["111"],
+            transcription=TranscriptionConfig(
+                provider="groq", groq_model="private-model-identifier"
+            ),
         ),
         "helper_bot": Profile(kind="bot", bot_backend="bot_api", identity={"id": "9"}),
     }
@@ -135,13 +142,15 @@ async def test_profiles_show_identity_state_and_parity_with_existing_contract(tm
                 source = contract[row["id"]]
                 assert row["kind"] == source["kind"] and row["backend"] == source["backend"]
                 assert row["identity"] == source["identity"]
+                assert row["proxy"] == source["proxy"]
                 assert row["read_policy"] == source["capabilities"]["read_policy"]
                 assert row["grants"] == source["grants"]
                 assert row["state"] == "not_opened" and row["error"] is None
-                assert "transcription_engines" not in row["capabilities"]
+                assert "private-model-identifier" not in json.dumps(row["capabilities"])
 
             alice, bot = data["profiles"]
             assert alice["state"] == "not_opened" and alice["limits"] == []
+            assert alice["capabilities"]["transcription_engines"]["default_provider"] == "groq"
             assert bot["limits"] and "saved updates only" in bot["limits"][0]
 
             instance.runtime.profile_errors["alice"] = "credentials_missing"
@@ -157,6 +166,18 @@ async def test_profiles_show_identity_state_and_parity_with_existing_contract(tm
             assert rows["helper_bot"]["state"] == "error"
             assert "disable polling" in rows["helper_bot"]["next_action"]
 
+            for code, action in (
+                ("rate_limited", "Wait for Telegram"),
+                ("invalid_proxy", "repair the local proxy"),
+                ("connection_error", "Check connectivity"),
+                ("https://example.invalid/private-session", "Inspect local configuration"),
+            ):
+                instance.runtime.profile_errors["helper_bot"] = code
+                failed = (await client.get("/ui/api/profiles")).json()["profiles"][1]
+                assert failed["state"] == "error"
+                assert action in failed["next_action"]
+                assert "private-session" not in json.dumps(failed)
+
             page = await client.get("/ui/profiles")
             assert page.status_code == 200
             assert "alice" in page.text and "helper_bot" in page.text
@@ -164,7 +185,12 @@ async def test_profiles_show_identity_state_and_parity_with_existing_contract(tm
             assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
             assert "credentials_missing" in page.text
             assert str(tmp_path) not in page.text
-            assert "Telegram history" not in page.text or "saved updates only" in page.text
+            assert "<dt>Telegram history</dt><dd>Available</dd>" in page.text
+            assert "<dt>Telegram history</dt><dd>Unavailable</dd>" in page.text
+            assert "<dt>Scheduled send</dt><dd>Available</dd>" in page.text
+            assert "<dt>Bot commands</dt><dd>Available</dd>" in page.text
+            assert "<dt>Send</dt><dd>111</dd>" in page.text
+            assert "read: 2 chat" not in page.text
 
 
 @pytest.mark.asyncio
@@ -204,9 +230,30 @@ async def test_tool_catalogue_shows_hidden_tools_and_changes_nothing(tmp_path):
             assert page.status_code == 200
             assert "delivery_execute" in page.text
             assert "Hidden by the owner&#x27;s tool exposure" in page.text
-            assert "saved updates only, so live history reads are unavailable" in page.text
+            assert "Saved updates only" in page.text
+            send = (
+                await client.get(
+                    "/ui/tools",
+                    params={
+                        "profile": "helper_bot",
+                        "q": "delivery_preview",
+                    },
+                )
+            ).text
+            assert "live history" not in send
             assert settings.exposed_tools == ["server_status", "messages_get"]
             assert settings.exposure_mode == "selected"
+            csrf = await login(client, instance)
+            form = {"profile_id": "alice", "chat_id": "111", "csrf": csrf}
+            assert (
+                "Selected read succeeded"
+                in (
+                    await client.post("/ui/probe", data=form, headers={"Origin": instance.origin})
+                ).text
+            )
+            settings.exposed_tools.remove("messages_get")
+            hidden = await client.post("/ui/probe", data=form, headers={"Origin": instance.origin})
+            assert "tool_not_exposed" in hidden.text
 
 
 @pytest.mark.asyncio
@@ -264,10 +311,10 @@ async def test_probe_needs_csrf_exact_chat_and_returns_no_content(tmp_path):
             )
             assert allowed.status_code == 200
             assert "Selected read succeeded" in allowed.text
-            assert "no content is shown" in allowed.text
+            assert "Returned 1 message" in allowed.text
             assert str(tmp_path) not in allowed.text and TOKEN not in allowed.text
             assert len(adapters) == 1 and adapters[0].reads == ["111"]
-            assert "1710000000" not in allowed.text
+            assert "<dt>Returned</dt><dd>1 message</dd>" in allowed.text
 
 
 @pytest.mark.asyncio
@@ -304,13 +351,16 @@ async def test_probe_reports_bot_limit_and_bounded_timeout(tmp_path):
             assert asyncio.get_running_loop().time() - started < 1.5
             assert "<code>timeout</code>" in slow.text
             assert "Wait for connection cleanup" in slow.text
-            assert "1710000000" not in slow.text
+            assert "<dt>Returned</dt><dd>—</dd>" in slow.text
             assert len(adapters) == 1
 
 
 @pytest.mark.asyncio
-async def test_mounted_panel_keeps_guard_csp_and_mcp_boundary(tmp_path):
+async def test_mounted_panel_keeps_guard_csp_and_mcp_boundary(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path, port=free_port(), profiles=two_profiles())
+    settings.save()
+    monkeypatch.setenv("TELELOOM_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("TELELOOM_MCP_TOKEN", TOKEN)
     async with real_owner(settings):
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{settings.port}") as client:
             assert (await client.get("/ui/api/profiles")).status_code == 401
@@ -350,3 +400,98 @@ async def test_mounted_panel_keeps_guard_csp_and_mcp_boundary(tmp_path):
             tools = await client.get("/ui/api/tools")
             assert tools.status_code == 200 and tools.json()["count"] > 0
             assert (await client.get("/mcp")).status_code == 401
+
+            result = await asyncio.to_thread(CliRunner().invoke, cli, ["doctor", "--live"])
+            assert result.exit_code == 0, result.output
+            report = json.loads(result.output)
+            profiles = (await client.get("/ui/api/profiles")).json()
+            assert profiles["tool_exposure"] == report["live"]["data"]["tool_exposure"]
+            for row, source in zip(
+                profiles["profiles"], report["live"]["data"]["profiles"], strict=True
+            ):
+                assert all(
+                    row[key] == source[key] for key in ("identity", "backend", "proxy", "grants")
+                )
+                assert all(
+                    source["capabilities"][key] == value
+                    for key, value in row["capabilities"].items()
+                    if key != "transcription_engines"
+                )
+                assert (
+                    row["capabilities"]["transcription_engines"]["default_provider"]
+                    == source["capabilities"]["transcription_engines"]["default_provider"]
+                )
+                assert row["state"] == "not_opened" and not source["connected"]
+
+
+@pytest.mark.asyncio
+async def test_chromium_profile_probe_does_not_replay_on_reload(tmp_path):
+    playwright = pytest.importorskip("playwright.async_api")
+    settings = Settings(
+        data_dir=tmp_path,
+        port=free_port(),
+        profiles=two_profiles(),
+        exposure_mode="selected",
+        exposed_tools=["messages_get", "profiles_list"],
+    )
+    adapters: list[FakeAdapter] = []
+    origin = f"http://127.0.0.1:{settings.port}"
+    async with (
+        real_owner(settings, factory(adapters, delay=1.2)),
+        playwright.async_playwright() as pw,
+    ):
+        browser = await pw.chromium.launch(executable_path=os.getenv("TELELOOM_TEST_CHROMIUM"))
+        try:
+            page = await browser.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(error))
+            issued = await page.request.post(
+                origin + "/ui/bootstrap", headers={"Authorization": "Bearer " + TOKEN}
+            )
+            assert issued.ok
+            await page.goto((await issued.json())["url"])
+            await page.wait_for_url("**/ui")
+            await page.goto(origin + "/ui/profiles")
+            assert await page.get_by_text("Not opened yet", exact=False).count() == 2
+            assert "<script>alert(1)</script>" in await page.locator("main").inner_text()
+            await page.get_by_text("Backend capabilities", exact=True).first.press("Enter")
+            await playwright.expect(
+                page.get_by_text("Telegram history", exact=True).first
+            ).to_be_visible()
+            await page.goto(origin + "/ui/tools")
+            await page.get_by_label("Search tools").fill("messages_get")
+            await page.get_by_label("Explain limits for").select_option("helper_bot")
+            await page.get_by_role("button", name="Filter").press("Enter")
+            await playwright.expect(
+                page.get_by_text("Saved updates only", exact=False)
+            ).to_be_visible()
+            assert adapters == []
+
+            await page.goto(origin + "/ui/profiles")
+            await page.get_by_label("Profile", exact=True).select_option("alice")
+            chat = page.get_by_label("Chat ID", exact=False)
+            await chat.fill("222")
+            probe = page.get_by_role("button", name="Run bounded probe")
+            await probe.press("Enter")
+            await playwright.expect(
+                page.get_by_text("read_not_allowed", exact=True)
+            ).to_be_visible()
+            assert adapters == []
+            await page.get_by_label("Profile", exact=True).select_option("alice")
+            await chat.fill("111")
+            await page.get_by_label("Timeout").select_option("1")
+            await probe.press("Enter")
+            await playwright.expect(
+                page.get_by_text("Running one bounded read…", exact=True)
+            ).to_be_visible()
+            await playwright.expect(page.get_by_text("timeout", exact=True)).to_be_visible()
+            assert len(adapters) == 1 and adapters[0].reads == ["111"]
+            assert page.url == origin + "/ui/profiles"
+            await page.reload()
+            await playwright.expect(
+                page.get_by_role("heading", name="Last probe result")
+            ).to_have_count(0)
+            assert len(adapters) == 1 and adapters[0].reads == ["111"]
+            assert errors == []
+        finally:
+            await browser.close()

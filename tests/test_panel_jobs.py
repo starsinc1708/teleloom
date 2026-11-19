@@ -1,6 +1,7 @@
 """Read-only jobs and receipts panel: pagination, policy and restart preservation."""
 
 import html
+import os
 import re
 import socket
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ import pytest
 from teleloom.config import Profile, Settings
 from teleloom.panel import Panel
 from teleloom.runtime import Runtime
+from tests.test_transport import running as running_http
 
 TOKEN = "panel-jobs-owner-token"
 
@@ -73,6 +75,7 @@ def job(
     kind: str = "sync",
     status: str = "queued",
     progress: int = 0,
+    next_run: float = 0.0,
     payload: dict | None = None,
     error: dict | None = None,
 ) -> None:
@@ -87,7 +90,7 @@ def job(
             "created_at": "2026-01-01T00:00:00+00:00",
             "payload": payload or {},
             "progress": progress,
-            "next_run": 0.0,
+            "next_run": next_run,
             "error": error,
             "result": None,
         },
@@ -194,6 +197,7 @@ async def test_delivery_detail_pages_receipts_and_preserves_partial_unknown_and_
                 kind="delivery",
                 status="needs_review",
                 progress=9,
+                next_run=1767225720,
                 payload={"recipients": [str(100 + index) for index in range(12)], "text": "secret"},
                 error={"code": "mutation_partial", "message": "SECRET-DETAIL must not render"},
             )
@@ -212,7 +216,7 @@ async def test_delivery_detail_pages_receipts_and_preserves_partial_unknown_and_
                 9,
                 "partial",
                 receipts=[
-                    {"accepted": True, "message_ids": ["6000"]},
+                    {"accepted": True, "message_ids": [str(6000 + index) for index in range(25)]},
                     {
                         "schedule_accepted": True,
                         "scheduled_for": "2026-02-01T10:00:00+00:00",
@@ -227,7 +231,13 @@ async def test_delivery_detail_pages_receipts_and_preserves_partial_unknown_and_
                 "unknown",
                 error={"code": "delivery_unknown", "message": "SECRET-DETAIL must not render"},
             )
-            delivery(panel.runtime.store, "delivery-job", 11, "pending")
+            delivery(
+                panel.runtime.store,
+                "delivery-job",
+                11,
+                "sent",
+                receipt={"schedule_accepted": True, "scheduled_for": "2026-02-01T11:00:00+00:00"},
+            )
         async with client(panel) as browser:
             await login(browser, panel)
             page = await browser.get("/ui/jobs/delivery-job?profile=work")
@@ -247,7 +257,11 @@ async def test_delivery_detail_pages_receipts_and_preserves_partial_unknown_and_
             assert second.status_code == 200
             assert "Showing positions 11–12" in second.text
             assert "Unknown — reconcile" in second.text
-            assert "6000" in page.text and "5008" in page.text
+            assert "6024" in page.text and "5008" in page.text
+            assert "<dt>Created (UTC)</dt><dd>2026-01-01T00:00:00+00:00</dd>" in page.text
+            assert "<dt>Next run (UTC)</dt><dd>2026-01-01T00:02:00+00:00</dd>" in page.text
+            assert "2026-01-01T00:01:00+00:00" in page.text
+            assert "Schedule accepted</span>" in second.text
             assert 'method="post"' not in page.text and "Resend" not in page.text
             assert "action=" not in page.text
 
@@ -292,7 +306,7 @@ async def test_job_and_receipt_access_follow_isolation_account_and_read_policy(t
             page = await browser.get("/ui/jobs")
             assert "visible" in page.text
             assert "Restricted under the current policy" in page.text
-            assert "(<code>account_changed</code>)" in page.text
+            assert "old-account" not in page.text
 
     settings.profiles["work"].read_mode = "selected"
     async with running(settings) as panel:
@@ -310,7 +324,10 @@ async def test_job_and_receipt_access_follow_isolation_account_and_read_policy(t
             assert revoked.status_code == 403
             assert "200" not in revoked.text
             listed = await browser.get("/ui/jobs")
-            assert "revoked" in listed.text and "read_not_allowed" in listed.text
+            assert (
+                "revoked" not in listed.text
+                and "Restricted under the current policy" in listed.text
+            )
 
     settings.exposure_mode = "selected"
     settings.exposed_tools = []
@@ -360,3 +377,129 @@ async def test_restart_preserves_jobs_and_receipts_and_reports_unknown_outcome(t
             assert "crash" not in page.text
     finally:
         await idle.close()
+
+
+@pytest.mark.asyncio
+async def test_chromium_pages_durable_receipts_after_owner_restart_and_revocation(tmp_path):
+    playwright = pytest.importorskip("playwright.async_api")
+    settings = Settings(
+        data_dir=tmp_path,
+        port=free_port(),
+        profiles={"work": Profile(kind="user"), "personal": Profile(kind="user")},
+    )
+    origin = f"http://127.0.0.1:{settings.port}"
+    detail = origin + "/ui/jobs/browser-delivery?profile=work"
+
+    async def sign_in(page):
+        issued = await page.request.post(
+            origin + "/ui/bootstrap", headers={"Authorization": "Bearer test-owner-token"}
+        )
+        assert issued.ok
+        await page.goto((await issued.json())["url"])
+        await page.wait_for_url("**/ui")
+
+    async with playwright.async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            executable_path=os.getenv("TELELOOM_TEST_CHROMIUM"),
+            ignore_default_args=["--disable-back-forward-cache"],
+        )
+        try:
+            page = await browser.new_page()
+            mutations = []
+            page.on(
+                "request",
+                lambda request: mutations.append(request.url) if request.method != "GET" else None,
+            )
+            async with running_http(settings, no_telegram, network=True) as app:
+                runtime = app.panel.runtime
+                with runtime.store.db:
+                    job(
+                        runtime.store,
+                        settings,
+                        "browser-delivery",
+                        kind="delivery",
+                        status="failed",
+                        payload={
+                            "recipients": [str(100 + i) for i in range(12)],
+                            "text": "private body",
+                        },
+                    )
+                    for position in range(12):
+                        status = {9: "partial", 11: "sending"}.get(position, "sent")
+                        delivery(
+                            runtime.store,
+                            "browser-delivery",
+                            position,
+                            status,
+                            message_id=str(5000 + position),
+                        )
+                runtime.profile_errors["work"] = "connection_error"
+                await sign_in(page)
+                assert (
+                    await page.goto(detail.replace("profile=work", "profile=personal"))
+                ).status == 404
+                await page.goto(origin + "/ui/jobs")
+                await page.get_by_label("Profile").select_option("work")
+                await page.get_by_label("Type").select_option("delivery")
+                await page.evaluate("""() => {
+                    const loading = document.querySelector('#jobs-loading');
+                    new MutationObserver(() => {
+                        if (!loading.hidden) sessionStorage.setItem('jobs-loading-seen', 'yes');
+                    }).observe(loading, {attributeFilter: ['hidden']});
+                }""")
+                await page.get_by_role("button", name="Apply filters").press("Enter")
+                await page.wait_for_url(re.compile(r"/ui/jobs\?profile=work"))
+                assert await page.evaluate("sessionStorage.getItem('jobs-loading-seen')") == "yes"
+                await page.get_by_role("link", name="Inspect").press("Enter")
+                await playwright.expect(
+                    page.get_by_text("Showing the last durable snapshot", exact=False)
+                ).to_be_visible()
+                await playwright.expect(page.get_by_text("5009", exact=True)).to_be_visible()
+                await playwright.expect(page.get_by_text("Partial", exact=True)).to_be_visible()
+                await page.get_by_role("link", name="Next receipts").press("Enter")
+                await playwright.expect(
+                    page.get_by_text("Showing positions 11", exact=False)
+                ).to_be_visible()
+                await playwright.expect(page.get_by_text("5011", exact=True)).to_be_visible()
+                second_page = page.url
+                await page.reload()
+                await playwright.expect(page.get_by_text("5011", exact=True)).to_be_visible()
+                await page.get_by_role("link", name="All jobs").press("Enter")
+                await page.wait_for_url("**/ui/jobs")
+                settings.profiles["work"].read_mode = "selected"
+                await page.go_back()
+                await playwright.expect(
+                    page.get_by_role("alert").filter(has_text="read policy does not allow")
+                ).to_be_visible()
+                await playwright.expect(page.get_by_text("5011", exact=True)).to_have_count(0)
+                settings.profiles["work"].read_mode = "all"
+                assert len(runtime.store.jobs()) == 1 and not runtime.adapters
+
+            async with running_http(settings, no_telegram, network=True) as restarted:
+                assert (await page.goto(second_page)).status == 401
+                await sign_in(page)
+                assert (await page.goto(second_page)).status == 200
+                await playwright.expect(
+                    page.get_by_text("Unknown", exact=False).first
+                ).to_be_visible()
+                await playwright.expect(page.get_by_text("5011", exact=True)).to_be_visible()
+                assert not restarted.panel.runtime.adapters
+
+            settings.profiles["work"].read_mode = "selected"
+            settings.profiles["work"].read_chats = ["100"]
+            async with running_http(settings, no_telegram, network=True) as revoked:
+                await sign_in(page)
+                denied = await page.goto(second_page)
+                assert denied.status == 403 and denied.headers["cache-control"] == "no-store"
+                await playwright.expect(page.get_by_text("5011", exact=True)).to_have_count(0)
+                await page.goto(origin + "/ui/jobs")
+                await playwright.expect(
+                    page.get_by_text("Restricted under the current policy")
+                ).to_be_visible()
+                await playwright.expect(page.get_by_role("link", name="Inspect")).to_have_count(0)
+                assert not revoked.panel.runtime.adapters
+            assert all(
+                url in {origin + "/ui/bootstrap", origin + "/ui/session"} for url in mutations
+            )
+        finally:
+            await browser.close()
