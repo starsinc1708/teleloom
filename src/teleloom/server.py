@@ -8,11 +8,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 
-from . import __version__
 from .account_operations import AccountOperation, AdministrationOperation
 from .adapters import make_adapter
 from .administration import AccountRead, AdministrationRead
-from .build_info import build_info
 from .config import Settings
 from .contacts import ContactOperation
 from .events import EventFilter
@@ -307,15 +305,11 @@ def create_server(
     ) -> ToolResult:
         """Inspect local owner/build and effective scope. Explicit profile_id + chat_id opts into one bounded user history read; no content, login, acknowledgment or delivery. Local/MCP status is not live Telegram health."""
         from .diagnostics import owner_scope, selected_probe
+        from .status import status_snapshot
 
-        info: dict[str, Any] = {
-            "version": __version__,
-            "build": build_info(),
-            "owner_id": runtime.owner_id,
-            "profiles": len(settings.profiles),
-            "health": {"local": "ok", "mcp": "ok", "telegram": "not_checked"},
-            "scope": owner_scope(settings, runtime),
-        }
+        info: dict[str, Any] = status_snapshot(settings, runtime)
+        info["health"]["mcp"] = "ok"
+        info["scope"] = owner_scope(settings, runtime)
         if profile_id is not None or chat_id is not None:
             info["probe"] = await selected_probe(runtime, profile_id, chat_id, timeout_seconds)
             info["health"]["telegram"] = (

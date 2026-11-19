@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -40,6 +41,7 @@ from . import __version__
 from .adapters import make_adapter
 from .config import Settings, private_dir
 from .models import TeleloomError
+from .panel import Panel
 from .runtime import AdapterFactory, Runtime, fingerprint
 from .secrets import Secrets
 from .server import create_server, output
@@ -85,12 +87,18 @@ def protocol_error(
 
 
 class LocalAuth:
-    def __init__(self, app: ASGIApp, token: str, port: int) -> None:
+    def __init__(self, app: ASGIApp, token: str, port: int, panel: Panel | None = None) -> None:
         self.app, self.token, self.host = app, token, f"127.0.0.1:{port}"
+        self.panel = panel
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        if self.panel is not None and (path == "/ui" or path.startswith("/ui/")):
+            # The panel enforces its own session, Host/Origin and CSRF policy.
+            await self.panel(scope, receive, send)
             return
         request = Request(scope, receive)
         if (
@@ -175,7 +183,16 @@ def create_application(
         ],
         lifespan=lifespan,
     )
-    return LocalAuth(app, token, settings.port)
+    return LocalAuth(app, token, settings.port, Panel(settings, runtime, token))
+
+
+def installed_interpreter() -> str:
+    """Use the interpreter that runs this installation, preferring windowless Windows Python."""
+    if sys.platform == "win32":
+        windowless = Path(sys.executable).with_name("pythonw.exe")
+        if windowless.is_file():
+            return str(windowless)
+    return sys.executable
 
 
 def serve(settings: Settings) -> None:
@@ -272,7 +289,9 @@ async def ensure_daemon(settings: Settings, token: str) -> None:
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             else:
                 kwargs["start_new_session"] = True
-            process = subprocess.Popen([sys.executable, "-m", "teleloom", "serve"], **kwargs)
+            process = subprocess.Popen(
+                [installed_interpreter(), "-m", "teleloom", "serve"], **kwargs
+            )
             for _ in range(150):
                 if await health(settings, token):
                     return

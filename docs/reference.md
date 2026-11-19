@@ -833,6 +833,21 @@ the selection through that same MCP session. Duplicate JSON/flag selection keys
 and combining fields with a preset are errors. `teleloom fields TOOL --request TEXT
 [--use-jev]` prints a suggestion without running a read.
 
+`teleloom ui [--no-open]` uses the same installed interpreter, data directory and
+owner start-up path, then prints a one-time browser URL. The page is a read-only
+loopback inspector of owner/build/workspace identity, local readiness, profile
+count and snapshot time. Its bootstrap expires after 60 seconds and is exchanged
+for an HttpOnly `SameSite=Strict`, `/ui`-scoped session cookie; logout revokes
+the session and an owner restart invalidates it. A passive visit grants nothing.
+The panel never exposes the MCP token or Telegram credentials and never reads
+Telegram or calls AI. MCP tools, grants and `/mcp` authentication are unchanged.
+See [ADR 0012](adr/0012-browser-panel-session.md).
+To open a panel of an already provisioned remote owner, follow
+[the private SSH tunnel runbook](gui-ssh.md): one loopback forward whose local
+port equals the remote owner port, native host-key verification and a bootstrap
+printed only on the remote command's stdout. Live VPS acceptance of that path
+remains pending.
+
 `teleloom doctor --mode local` is the default, machine-readable local installation
 check. It reports package provenance, explicit daemon `not_checked` status,
 safe-check results, optional engine availability and recovery actions without
