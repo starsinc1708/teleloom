@@ -462,3 +462,26 @@ async def test_legacy_ipv6_migration_preserves_telethon_route(tmp_path, monkeypa
     fresh = Settings.load(tmp_path)
     assert fresh.proxies["legacy_personal"].host == "2001:db8::1"
     assert route(fresh) == expected
+
+
+@pytest.mark.asyncio
+async def test_failed_apply_restores_keyring_slot_without_copying_environment_override(
+    tmp_path, monkeypatch
+):
+    stored = fake_keyring(monkeypatch)
+    instance = make_control_proxy(tmp_path)
+    name = "teleloom:_named_proxy:corp"
+    stored[name] = "previous keyring value"
+    monkeypatch.setenv("TELELOOM__NAMED_PROXY_CORP", "ephemeral override")
+
+    def failed_write(*args):
+        raise OSError("test write failure")
+
+    monkeypatch.setattr(control_proxies, "write_config", failed_write)
+    async with login(instance) as http:
+        applied = await apply(
+            http, instance, digest(tmp_path), **ENDPOINT, username="new-user", password=PASSWORD
+        )
+        assert applied.status_code == 500 and "write failed" in applied.text
+    assert stored[name] == "previous keyring value"
+    assert Secrets().get("_named_proxy", "corp") == "ephemeral override"

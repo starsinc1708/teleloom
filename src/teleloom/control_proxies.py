@@ -219,7 +219,7 @@ def write(
             profile.pop("proxy", None)
         else:
             profile["proxy"] = choice
-    previous = {name: secrets.get(NAMED_PROXY, name, environment=False) for name, _, _ in copied}
+    previous = {name: secrets.get_keyring(NAMED_PROXY, name) for name, _, _ in copied}
     applied = []
     try:
         for name, username, password in copied:

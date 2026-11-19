@@ -20,6 +20,10 @@ _PROFILE_CREDENTIALS = {
 }
 
 
+def _variable(profile: str, name: str) -> str:
+    return f"TELELOOM_{profile.upper()}_{name.upper()}" if profile else f"TELELOOM_{name.upper()}"
+
+
 class Secrets:
     """OS credentials, with explicit environment overrides; never plaintext files."""
 
@@ -42,18 +46,18 @@ class Secrets:
             None,
         )
 
-    def get(self, profile: str, name: str, *, environment: bool = True) -> str | None:
-        variable = (
-            f"TELELOOM_{profile.upper()}_{name.upper()}" if profile else f"TELELOOM_{name.upper()}"
-        )
-        if environment and (value := os.getenv(variable)):
-            return value
+    def get(self, profile: str, name: str) -> str | None:
+        return os.getenv(_variable(profile, name)) or self.get_keyring(profile, name)
+
+    def get_keyring(self, profile: str, name: str) -> str | None:
+        """Read the saved value independently of an environment override."""
         try:
             backend = self.backend()
             return backend.get_password("teleloom", f"{profile}:{name}") if backend else None
         except KeyringError:
             raise TeleloomError(
-                "credentials_unavailable", f"Configure an OS keyring or set {variable}."
+                "credentials_unavailable",
+                f"Configure an OS keyring or set {_variable(profile, name)}.",
             ) from None
 
     def named_proxy(self, name: str, *, legacy: bool) -> str | None:
@@ -72,14 +76,9 @@ class Secrets:
     def require(self, profile: str, name: str) -> str:
         value = self.get(profile, name)
         if not value:
-            variable = (
-                f"TELELOOM_{profile.upper()}_{name.upper()}"
-                if profile
-                else f"TELELOOM_{name.upper()}"
-            )
             raise TeleloomError(
                 "credentials_missing",
-                f"Missing credential. Set {variable} or run teleloom init/auth.",
+                f"Missing credential. Set {_variable(profile, name)} or run teleloom init/auth.",
             )
         return value
 
