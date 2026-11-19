@@ -497,7 +497,7 @@ form.addEventListener('submit',async e=>{{e.preventDefault();
     headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},
     body:JSON.stringify({{password}})}});
     if(!response.ok)status.textContent='Password was not accepted. Check the login state.';
-  }}catch(e){{status.textContent='Could not submit the password.';}}finally{{password='';input.value='';}});
+  }}catch(e){{status.textContent='Could not submit the password.';}}finally{{password='';input.value='';}}}});
 cancel.addEventListener('click',()=>fetch('/control/user/cancel',{{method:'POST',
   headers:{{'X-CSRF-Token':csrf}}}}));
 poll();
