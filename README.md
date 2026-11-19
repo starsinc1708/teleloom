@@ -77,8 +77,7 @@ uv run teleloom skills install --client hermes
 ```
 
 Choose the pair for your client, then reconnect MCP (`opencode reload` for a running
-OpenCode service). `--install` is available in
-the current source checkout; v0.5.0 only prints fragments. An identical connection
+OpenCode service). Native `--install` is available starting with v0.6.0. An identical connection
 is preserved; a conflicting `teleloom` entry requires manual review. Hermes skills
 follow `hermes config path`, including its active profile and `HERMES_HOME`.
 

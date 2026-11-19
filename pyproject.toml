@@ -1,6 +1,6 @@
 [project]
 name = "teleloom"
-version = "0.5.0"
+version = "0.6.0"
 description = "Teleloom: Telegram tools, portable agent skills, MCP server and CLI"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

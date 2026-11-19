@@ -1,6 +1,6 @@
 # MCP and CLI reference
 
-Current v0.5.0 public behavior. `tools/list` and typed schemas are authoritative;
+Current v0.6.0 public behavior. `tools/list` and typed schemas are authoritative;
 the [roadmap](roadmap.md) separates proposals from implemented contracts.
 
 - [Profiles/discovery](#profiles-and-discovery) and [read policy/exposure](#read-policy-and-tool-exposure)
@@ -707,9 +707,8 @@ could accidentally replay them; inspect Telegram and explicitly plan remaining w
 
 ## Plan authorization from explicit owner instructions
 
-Available in the current source checkout; released v0.5.0 retains the CLI-only
-standing-permission workflow. Upgrade the owner and refresh client discovery/skills
-before using the new preview argument.
+Available starting with v0.6.0. Upgrade the owner and refresh client
+discovery and skills before using the new preview argument.
 
 `delivery_preview`, `message_operation_preview` and `media_operation_preview`
 accept optional `owner_authorized=false`. If the human owner explicitly requests

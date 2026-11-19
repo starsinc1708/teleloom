@@ -31,7 +31,7 @@ Teleloom позволяет искать сообщения, разбирать 
 данные локально, вне переписки с агентом.
 
 ```powershell
-git clone --branch v0.5.0 --single-branch https://github.com/starsinc1708/teleloom.git
+git clone --branch v0.6.0 --single-branch https://github.com/starsinc1708/teleloom.git
 Set-Location teleloom
 uv sync --frozen
 uv run teleloom init
