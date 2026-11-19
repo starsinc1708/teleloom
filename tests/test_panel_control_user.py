@@ -16,6 +16,7 @@ from telethon.crypto import AuthKey
 from telethon.sessions import StringSession
 
 from teleloom import control
+from teleloom.build_info import build_info
 from teleloom.config import Settings
 
 BASE = {
@@ -27,6 +28,11 @@ BASE = {
 }
 SECRET_HASH = "api-hash-must-not-leak"
 PASSWORD = "cloud-secret"
+
+
+@pytest.fixture(autouse=True)
+def isolated_session_locks(tmp_path, monkeypatch):
+    monkeypatch.setattr("teleloom.session_state.lock_directory", lambda: tmp_path / "session-locks")
 
 
 class FakeCredentials:
@@ -58,6 +64,20 @@ class FakeLifecycle:
             "owner_id": self.owner,
             "workspace_id": control.workspace_id(settings),
             "version": "0.5.0",
+            "build": build_info(),
+            "scope": {
+                "profiles": [
+                    {
+                        "id": name,
+                        "identity": profile.identity,
+                        "kind": profile.kind,
+                        "backend": "mtproto" if profile.kind == "user" else profile.bot_backend,
+                        "grants": profile.grants(),
+                        "capabilities": {"polling_enabled": profile.polling},
+                    }
+                    for name, profile in Settings.load(settings.data_dir).profiles.items()
+                ]
+            },
         }
 
 
@@ -78,6 +98,7 @@ class QR:
 
     async def recreate(self):
         self.client.refreshes += 1
+        self.url = "tg://login?token=REFRESHED-QR"
         self.client.scanned.clear()
         self.expires = datetime.now(UTC) + timedelta(seconds=60)
 
@@ -154,7 +175,11 @@ async def start_login(client, instance, **fields):
     page = await client.get("/control/user")
     return await client.post(
         "/control/user/start",
-        data={"csrf": csrf_of(page.text), **fields},
+        data={
+            "csrf": csrf_of(page.text),
+            "revision": page.text.split('name="revision" value="', 1)[1].split('"', 1)[0],
+            **fields,
+        },
         headers={"Origin": instance.origin},
     )
 
@@ -401,10 +426,10 @@ async def test_failed_config_save_restores_previous_session_and_restarts(tmp_pat
         },
     )
 
-    def no_space(self):
+    def no_space(*args):
         raise OSError(28, "no space left")
 
-    monkeypatch.setattr(Settings, "save", no_space)
+    monkeypatch.setattr("teleloom.control_user.write_config", no_space)
     async with client_for(instance) as client:
         await sign_in(client, instance)
         assert (
@@ -451,3 +476,39 @@ async def test_credential_backend_refusal_is_explicit_and_saves_nothing(tmp_path
     assert "locked" not in json.loads(path.read_text())["profiles"]
     assert len(lifecycle.started) == 1
     no_secret_in(path, tmp_path / "workspace.sqlite")
+
+
+@pytest.mark.asyncio
+async def test_qr_expiry_refreshes_and_connection_owner_is_kept_until_restart(
+    tmp_path, monkeypatch
+):
+    config(tmp_path)
+    telegram = FakeTelegram()
+    telegram.qr.expires = datetime.now(UTC) - timedelta(seconds=1)
+    instance, lifecycle = make(
+        tmp_path, telegram=telegram, stored={"newbie:api_id": "1", "newbie:api_hash": SECRET_HASH}
+    )
+    observe = lifecycle.observed
+    observing = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def delayed_observation(settings):
+        observing.set()
+        await finish.wait()
+        return await observe(settings)
+
+    monkeypatch.setattr(lifecycle, "observed", delayed_observation)
+    async with client_for(instance) as client:
+        await sign_in(client, instance)
+        assert (await start_login(client, instance, name="newbie")).status_code == 202
+        await until(lambda: telegram.refreshes == 1 and telegram.waiting.is_set())
+        await until(
+            lambda: instance.user.flow.state.get("expires") == telegram.qr.expires.isoformat()
+        )
+        telegram.scanned.set()
+        await asyncio.wait_for(observing.wait(), 3)
+        state = (await client.get("/control/user/state")).json()
+        assert state["phase"] == "saving" and "identity" not in state and "qr_svg" not in state
+        finish.set()
+        await asyncio.wait_for(instance.user.task, 3)
+        assert (await client.get("/control/user/state")).json()["phase"] == "done"

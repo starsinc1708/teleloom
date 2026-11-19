@@ -13,8 +13,8 @@ import hmac
 import html
 import json
 import secrets
+import time
 from collections.abc import Callable
-from contextlib import suppress
 from typing import Any
 
 from starlette.requests import Request
@@ -23,7 +23,7 @@ from starlette.routing import Route
 
 from .auth import LoginFlow
 from .config import Profile, Settings, validate_name
-from .control import transition
+from .control import read_config, revision, transition, write_config
 from .models import TeleloomError
 from .secrets import Secrets
 
@@ -55,6 +55,8 @@ class Onboarding:
         self.phase = "idle"
         self.message: str | None = None
         self.identity: dict[str, str] | None = None
+        self.cancelled = asyncio.Event()
+        self.failed_locks: list[Any] = []
 
     @property
     def settings(self) -> Settings:
@@ -85,31 +87,35 @@ class Onboarding:
             validate_name(name)
         except ValueError as error:
             raise TeleloomError("invalid_name", str(error)) from None
-        if name in self.settings.profiles and not replace:
+        raw, data = read_config(self.settings)
+        existing = (data.get("profiles") or {}).get(name)
+        if existing is not None and not replace:
             raise TeleloomError(
                 "profile_exists",
                 "A profile with this name already exists. Choose another name, or replace "
                 "this one explicitly; a name match never rotates an identity.",
             )
-        api_id = self.credentials.get(name, "api_id")
+        api_id = self.credentials.get(name, "api_id") or (existing or {}).get("api_id")
         if not self.credentials.get(name, "api_hash"):
             api_id = None
         if not api_id:
             raise TeleloomError(
                 "credentials_missing",
-                f"No Telegram API credentials for '{name}' are stored. Run "
-                f"teleloom auth user --profile {name} once to store them on this machine.",
+                f"No Telegram API credentials for '{name}' are available. Supply them through "
+                "the OS credential backend or the profile's API environment variables.",
             )
         try:
             number = int(api_id)
-        except ValueError:
+            if number <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
             raise TeleloomError(
-                "credentials_invalid", "The stored API ID is not an integer."
+                "credentials_invalid", "The stored API ID must be a positive integer."
             ) from None
         # A new GUI profile is selected with no chats: no read, send, AI or
         # management grant exists until the owner adds one after login.
         config = Profile(kind="user", api_id=number, read_mode="selected")
-        return {"profile": name, "replace": replace, "config": config}
+        return {"profile": name, "revision": revision(raw), "config": config}
 
     # -- HTTP surface ---------------------------------------------------------
 
@@ -123,7 +129,7 @@ class Onboarding:
 
     @staticmethod
     def _csrf(form: Any, found: Any) -> Response | None:
-        sent = str(form.get("csrf", ""))
+        sent = (form.get("csrf") or [""])[0]
         if not hmac.compare_digest(sent.encode(), found[1].csrf.encode()):
             return JSONResponse({"error": "invalid_csrf"}, status_code=403)
         return None
@@ -138,20 +144,26 @@ class Onboarding:
         found, denied = self._guard(request, mutation=True)
         if denied is not None:
             return denied
-        length = request.headers.get("content-length", "0")
-        if not length.isdigit() or int(length) > 16384:
-            return JSONResponse({"error": "request_too_large"}, status_code=413)
-        form = await request.form()
+        form = await self.control._form(request)
+        if isinstance(form, Response):
+            return form
         refused = self._csrf(form, found)
         if refused is not None:
             return refused
         if self.task is not None and not self.task.done():
             return self._render(found[1].csrf, 409, "A login is already running in this process.")
         try:
-            plan = self.plan_for(str(form.get("name", "")).strip(), form.get("replace") == "1")
+            plan = self.plan_for(
+                (form.get("name") or [""])[0].strip(), form.get("replace") == ["1"]
+            )
         except TeleloomError as error:
             return self._render(found[1].csrf, 422, f"{error.code}: {error.message}")
+        if form.get("revision") != [plan["revision"]]:
+            return self._render(
+                found[1].csrf, 409, "Configuration changed. Review the profile and retry."
+            )
         self.plan, self.identity, self.flow = plan, None, None
+        self.cancelled = asyncio.Event()
         self.phase, self.message = "starting", "Validated. Login starts after the owner stops."
         self.task = asyncio.create_task(self._login())
         return self._render(found[1].csrf, 202)
@@ -170,15 +182,17 @@ class Onboarding:
             request.headers.get("x-csrf-token", "").encode(), found[1].csrf.encode()
         ):
             return JSONResponse({"error": "invalid_csrf"}, status_code=403)
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 8192:
+                return JSONResponse({"error": "request_too_large"}, status_code=413)
+            body.extend(chunk)
         if (
             self.flow is None
             or self.flow.state["phase"] != "password"
             or not self.flow.passwords.empty()
         ):
             return JSONResponse({"error": "password_not_requested"}, status_code=409)
-        body = await request.body()
-        if len(body) > 8192:
-            return JSONResponse({"error": "request_too_large"}, status_code=413)
         try:
             password = json.loads(body).get("password")
         except (ValueError, AttributeError):
@@ -197,15 +211,23 @@ class Onboarding:
             request.headers.get("x-csrf-token", "").encode(), found[1].csrf.encode()
         ):
             return JSONResponse({"error": "invalid_csrf"}, status_code=403)
-        if self.flow is None or self.task is None or self.task.done():
+        if (
+            self.task is None
+            or self.task.done()
+            or self.phase == "saving"
+            or (self.flow is not None and self.flow.state["phase"] in TERMINAL_PHASES)
+        ):
             return JSONResponse({"error": "login_not_running"}, status_code=409)
-        self.flow.cancelled.set()
+        self.cancelled.set()
         return JSONResponse({"cancelled": True})
 
     def snapshot(self) -> dict[str, Any]:
         running = self.task is not None and not self.task.done()
-        if running and self.flow is not None:
-            return {**self.flow.state, "profile": (self.plan or {}).get("profile")}
+        if running and self.phase not in TERMINAL_PHASES:
+            if self.flow is not None and self.flow.state["phase"] not in TERMINAL_PHASES:
+                return {**self.flow.state, "profile": (self.plan or {}).get("profile")}
+            if self.flow is not None:
+                return {"phase": "saving", "message": "Finishing login and restoring the owner."}
         return {
             "phase": self.phase,
             "message": self.message,
@@ -222,10 +244,14 @@ class Onboarding:
             self.settings,
             {"operation": "user_login", "profile": plan.get("profile")},
             lambda: self._authorize(plan),
+            verify=lambda observed: profile_mismatches(observed, plan["profile"], plan["config"]),
         )
         if error is not None:
             self.phase = "cancelled" if error.code == "auth_cancelled" else "failed"
             self.message = f"{error.code}: {error.message}"
+        elif self.identity:
+            self.phase = "done"
+        self.flow = None
         owner = (record or {}).get("owner") or {}
         if owner:
             self._note(f"Owner {owner.get('owner_id')} answers in this workspace.")
@@ -233,15 +259,42 @@ class Onboarding:
     async def _authorize(self, plan: dict[str, Any]) -> None:
         """Runs under owner.lock: the whole QR/2FA login, including its awaits."""
         name, config = plan["profile"], plan["config"]
+        from .session_state import acquire_session
+
+        if self.cancelled.is_set():
+            raise TeleloomError("auth_cancelled", "Login cancelled.")
+        raw, _ = read_config(self.settings)
+        if revision(raw) != plan["revision"]:
+            raise TeleloomError(
+                "stale_revision", "Configuration changed. Review the profile and retry."
+            )
         client = self.connector(name, config, self.credentials)
+        self.flow = LoginFlow(client, timeout=self.timeout)
+        self.flow.cancelled = self.cancelled
+        self.flow.deadline = time.monotonic() + self.timeout
+        lock = None
         try:
-            await client.connect()
-            self.flow = LoginFlow(client, timeout=self.timeout)
+            try:
+                await self.flow._await(client.connect())
+            except TimeoutError:
+                raise TeleloomError(
+                    "auth_timeout", "Connection timed out. Start a new login."
+                ) from None
+            lock = acquire_session(client.session)
             self.phase = "login"
             identity = await self.flow.run()
+            self.phase = "saving"
             self._save(plan, identity, client)
         finally:
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            except BaseException:
+                if lock is not None:
+                    self.failed_locks.append(lock)
+                raise
+            else:
+                if lock is not None:
+                    lock.release()
 
     def _save(self, plan: dict[str, Any], identity: dict[str, str], client: Any) -> None:
         """Write the session and profile only after Telegram confirmed the identity.
@@ -253,12 +306,14 @@ class Onboarding:
         from telethon.sessions import StringSession
 
         settings, name, config = self.settings, plan["profile"], plan["config"]
-        fresh = Settings.load(settings.data_dir)
-        if name in fresh.profiles and not plan.get("replace"):
+        if getattr(client.session, "auth_key", None) is None:
+            raise TeleloomError("auth_failed", "Telegram supplied no valid session.")
+        raw, data = read_config(settings)
+        if revision(raw) != plan["revision"]:
             raise TeleloomError(
-                "profile_exists",
-                f"A profile named '{name}' appeared while this login ran. Nothing was saved.",
+                "stale_revision", "Configuration changed. Review the profile and retry."
             )
+        fresh = Settings.load(settings.data_dir)
         other = next(
             (
                 key
@@ -277,20 +332,25 @@ class Onboarding:
         self.credentials.set(name, "session", StringSession.save(client.session))
         try:
             config.identity = identity
-            fresh.profiles[name] = config
-            fresh.save()
+            data.setdefault("profiles", {})[name] = config.model_dump(mode="json")
+            write_config(settings, data)
         except Exception as error:
-            if previous:
-                with suppress(TeleloomError):
+            try:
+                if previous:
                     self.credentials.set(name, "session", previous)
+                else:
+                    self.credentials.delete(name, "session")
+            except TeleloomError:
+                raise TeleloomError(
+                    "rollback_failed",
+                    "The configuration is unchanged, but its OS credential could not be restored.",
+                ) from None
             raise TeleloomError(
                 "save_failed",
-                f"config.json could not be saved ({type(error).__name__}); the previous "
-                "credential was restored and no profile changed.",
+                f"config.json could not be saved ({type(error).__name__}); the profile was not changed.",
             ) from None
-        settings.profiles = fresh.profiles
+        settings.profiles = {**fresh.profiles, name: config}
         self.identity = identity
-        self.phase = "done"
         self.message = (
             f"Connected as {identity.get('username') or identity.get('name') or identity.get('id')} "
             f"and saved as '{name}'. Read policy is selected with no chats and no grants."
@@ -303,11 +363,37 @@ class Onboarding:
 
     def _render(self, csrf: str, status: int = 200, message: str | None = None) -> Response:
         nonce = secrets.token_urlsafe(16)
+        raw, data = read_config(self.settings)
+        fresh = Settings.model_validate({**data, "data_dir": self.settings.data_dir})
         return HTMLResponse(
-            _page(self.settings, csrf, nonce, self.snapshot(), message or self.message),
+            _page(fresh, csrf, nonce, revision(raw), self.snapshot(), message or self.message),
             status_code=status,
             headers=self.control._headers(nonce),
         )
+
+
+def profile_mismatches(observed: dict[str, Any], name: str, profile: Profile) -> list[str]:
+    found = next(
+        (
+            item
+            for item in ((observed.get("scope") or {}).get("profiles") or [])
+            if item.get("id") == name
+        ),
+        None,
+    )
+    expected = {
+        "identity": profile.identity,
+        "kind": profile.kind,
+        "backend": "mtproto" if profile.kind == "user" else profile.bot_backend,
+        "grants": profile.grants(),
+    }
+    if found is None or any(found.get(key) != value for key, value in expected.items()):
+        return [f"The restarted owner does not report the reviewed profile {name}."]
+    if found.get("error"):
+        return [f"The restarted owner reports a connection error for profile {name}."]
+    if (found.get("capabilities") or {}).get("polling_enabled") != profile.polling:
+        return [f"The restarted owner reports a different polling setting for profile {name}."]
+    return []
 
 
 def _profiles(settings: Settings) -> str:
@@ -327,7 +413,12 @@ def _profiles(settings: Settings) -> str:
 
 
 def _page(
-    settings: Settings, csrf: str, nonce: str, state: dict[str, Any], message: str | None
+    settings: Settings,
+    csrf: str,
+    nonce: str,
+    digest: str,
+    state: dict[str, Any],
+    message: str | None,
 ) -> str:
     poll = "1" if state.get("phase") not in TERMINAL_PHASES | {"idle"} else ""
     note = f'<p role="status" class="state">{_esc(message)}</p>' if message else ""
@@ -347,6 +438,7 @@ button{{font:inherit;padding:10px 16px;border-radius:6px;border:1px solid #b8b4a
 button:focus-visible,input:focus-visible,a:focus-visible{{outline:3px solid #24231f;outline-offset:2px}}
 .state{{border-left:4px solid #68665d;padding:.7em 1em;background:#ece8df}}
 #qr{{background:white;border-radius:12px;min-height:240px;display:flex;align-items:center;justify-content:center}}
+#qr[hidden],form[hidden]{{display:none}}
 #qr svg{{width:240px;height:240px}}
 </style></head><body><main>
 <p class="small">teleloom / owner management · this process is not the owner</p>
@@ -356,7 +448,7 @@ button:focus-visible,input:focus-visible,a:focus-visible{{outline:3px solid #242
 <section aria-labelledby="policy"><h2 id="policy">What the new profile gets</h2>
 <p>Read policy <code>selected</code> with no chats, and no send, broadcast, AI, event,
 management or other grants. Login itself grants nothing, and this form never changes an
-existing profile's read policy or grants.</p>
+existing profile without explicit replacement.</p>
 {_profiles(settings)}</section>
 <form id="start" method="post" action="/control/user/start">
 <label for="name">New profile name</label>
@@ -365,6 +457,7 @@ existing profile's read policy or grants.</p>
 <span id="name-hint" class="small">Lowercase letter first; letters, digits or underscores.</span>
 <label><input type="checkbox" name="replace" value="1"> Replace the existing profile with this name (new generation, grants reset)</label>
 <input type="hidden" name="csrf" value="{_esc(csrf)}">
+<input type="hidden" name="revision" value="{_esc(digest)}">
 <button type="submit">Validate and start QR login</button>
 </form>
 <section id="login" aria-labelledby="login-h"><h2 id="login-h">Login</h2>
@@ -392,7 +485,7 @@ function show(s){{
     Math.max(0,Math.ceil((Date.parse(s.expires)-Date.now())/1000))+'s; refreshes automatically.';}}
   else{{qr.hidden=true;qr.replaceChildren();}}
   if(['done','failed','cancelled'].indexOf(s.phase)>=0){{done=true;
-    if(!window.__reloaded){{window.__reloaded=true;setTimeout(()=>location.reload(),600);}}}}
+    if(!window.__reloaded){{window.__reloaded=true;setTimeout(()=>location.replace("/control/user"),600);}}}}
 }}
 async function poll(){{if(done)return;try{{
   const r=await fetch('/control/user/state',{{cache:'no-store'}});if(!r.ok)throw Error();
@@ -400,9 +493,11 @@ async function poll(){{if(done)return;try{{
   if(!done)setTimeout(poll,500);}}
 form.addEventListener('submit',async e=>{{e.preventDefault();
   const input=document.querySelector('#secret');let password=input.value;input.value='';
-  try{{await fetch('/control/user/password',{{method:'POST',
+  try{{const response=await fetch('/control/user/password',{{method:'POST',
     headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},
-    body:JSON.stringify({{password}})}});}}finally{{password='';input.value='';}});
+    body:JSON.stringify({{password}})}});
+    if(!response.ok)status.textContent='Password was not accepted. Check the login state.';
+  }}catch(e){{status.textContent='Could not submit the password.';}}finally{{password='';input.value='';}});
 cancel.addEventListener('click',()=>fetch('/control/user/cancel',{{method:'POST',
   headers:{{'X-CSRF-Token':csrf}}}}));
 poll();

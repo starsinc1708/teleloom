@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from teleloom import control as control_module
+from teleloom.build_info import build_info
 from teleloom.config import Settings
 from teleloom.models import TeleloomError
 
@@ -77,6 +78,20 @@ class FakeLifecycle:
             "owner_id": "owner-1",
             "workspace_id": control_module.workspace_id(settings),
             "version": "0.5.0",
+            "build": build_info(),
+            "scope": {
+                "profiles": [
+                    {
+                        "id": name,
+                        "identity": profile.identity,
+                        "kind": profile.kind,
+                        "backend": "mtproto" if profile.kind == "user" else profile.bot_backend,
+                        "grants": profile.grants(),
+                        "capabilities": {"polling_enabled": profile.polling},
+                    }
+                    for name, profile in Settings.load(settings.data_dir).profiles.items()
+                ]
+            },
         }
 
 
@@ -178,13 +193,17 @@ async def test_replace_needs_confirmation_and_keeps_generation_and_grants(tmp_pa
     async with signed_in(panel, app) as client:
         csrf = await csrf_of(client)
         page = (await review(client, panel, csrf, name="robot", token=NEW_TOKEN)).text
-        assert 'name="confirm"' in page and "keep-this-generation" not in page
+        assert (
+            'name="confirm"'
+            in page.split('action="/control/bot/apply">', 1)[1].split("</form>", 1)[0]
+        )
+        assert "keep-this-generation" not in page
         refused = await submit(client, panel, "/control/bot/apply", csrf, review=review_key(page))
         assert refused.status_code == 422 and "Confirm the replacement" in refused.text
         assert Settings.load(tmp_path).profiles["robot"].generation == "keep-this-generation"
         assert store.stored["robot:bot_token"] == OLD_TOKEN
         applied = await submit(
-            client, panel, "/control/bot/apply", csrf, review=review_key(page), confirm="1"
+            client, panel, "/control/bot/apply", csrf, review=review_key(refused.text), confirm="1"
         )
         assert applied.status_code == 200, applied.text
     saved = Settings.load(tmp_path).profiles["robot"]
@@ -200,7 +219,7 @@ async def test_cancel_clears_pending_token_and_writes_nothing(tmp_path):
         csrf = await csrf_of(client)
         page = (await review(client, panel, csrf)).text
         key = review_key(page)
-        cancelled = await submit(client, panel, "/control/bot/cancel", csrf)
+        cancelled = await submit(client, panel, "/control/bot/cancel", csrf, review=key)
         assert (
             cancelled.status_code == 200
             and "No profile or credential was changed" in cancelled.text
@@ -301,10 +320,10 @@ async def test_failed_config_save_restores_previous_token(tmp_path, monkeypatch)
     panel, _, store, _, app = setup(tmp_path)
     before = (tmp_path / "config.json").read_bytes()
 
-    def no_space(self):
+    def no_space(*args):
         raise OSError(28, "no space left")
 
-    monkeypatch.setattr(Settings, "save", no_space)
+    monkeypatch.setattr("teleloom.control_bot.write_config", no_space)
     async with signed_in(panel, app) as client:
         csrf = await csrf_of(client)
         page = (await review(client, panel, csrf, name="robot", token=NEW_TOKEN)).text
@@ -334,3 +353,21 @@ async def test_active_job_blocks_before_any_stop_or_write(tmp_path, monkeypatch)
     assert panel.lifecycle.stopped == 0 and panel.lifecycle.started == []
     assert (tmp_path / "config.json").read_bytes() == before
     assert "newbot:bot_token" not in store.stored
+
+
+async def test_changed_revision_invalidates_bot_review_before_stop(tmp_path):
+    panel, _, store, _, app = setup(tmp_path)
+    path = tmp_path / "config.json"
+    async with signed_in(panel, app) as client:
+        csrf = await csrf_of(client)
+        page = (await review(client, panel, csrf, name="robot", token=NEW_TOKEN)).text
+        changed = json.loads(path.read_text())
+        changed["profiles"]["robot"]["send_chats"] = ["200"]
+        path.write_text(json.dumps(changed), encoding="utf-8")
+        result = await submit(
+            client, panel, "/control/bot/apply", csrf, review=review_key(page), confirm="1"
+        )
+        assert result.status_code == 409
+    assert panel.lifecycle.stopped == 0
+    assert store.stored["robot:bot_token"] == OLD_TOKEN
+    assert json.loads(path.read_text())["profiles"]["robot"]["send_chats"] == ["200"]

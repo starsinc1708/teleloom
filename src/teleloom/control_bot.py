@@ -4,13 +4,13 @@ The token lives only in this process between Review and Apply, is never rendered
 logged or returned by an error, and only a verified identity may write config.
 """
 
+import asyncio
 import hashlib
 import hmac
 import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,7 +19,8 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from .config import Profile, Settings, validate_name
-from .control import _esc, transition
+from .control import _esc, read_config, revision, transition, write_config
+from .control_user import profile_mismatches
 from .models import TeleloomError
 from .secrets import Secrets
 
@@ -36,12 +37,14 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _sanitised(raw: Any) -> dict[str, str]:
+def _sanitised(raw: Any, token: str) -> dict[str, str]:
     """Bot API metadata is untrusted: keep three exact fields, print-capable and bounded."""
     data = raw if isinstance(raw, dict) else {}
 
     def text(key: str, limit: int, pattern: str | None = None) -> str:
-        value = "".join(ch for ch in str(data.get(key) or "") if ch.isprintable())
+        value = "".join(
+            ch for ch in str(data.get(key) or "").replace(token, "") if ch.isprintable()
+        )
         return re.sub(pattern, "", value)[:limit] if pattern else value[:limit]
 
     return {
@@ -58,7 +61,8 @@ async def _telegram_identity(token: str, polling: bool, proxy: str | None) -> di
 
     from .auth import identity
 
-    bot = Bot(token, session=AiohttpSession(proxy=proxy))
+    session = AiohttpSession(proxy=proxy)
+    bot = Bot(token, session=session)
     try:
         me = await bot.get_me()
         if polling and (await bot.get_webhook_info()).url:
@@ -67,6 +71,8 @@ async def _telegram_identity(token: str, polling: bool, proxy: str | None) -> di
                 "Telegram still delivers this bot's updates to a webhook. Remove it in the "
                 "place that set it, then retry; this tool never changes a webhook.",
             )
+        if not me.is_bot or str(me.id) != token.split(":", 1)[0]:
+            raise TeleloomError("auth_failed", "Telegram did not confirm a bot identity.")
         return identity(me)
     except TeleloomError:
         raise
@@ -75,7 +81,7 @@ async def _telegram_identity(token: str, polling: bool, proxy: str | None) -> di
             "auth_failed", "Telegram did not confirm this Bot API token. Nothing was saved."
         ) from None
     finally:
-        await bot.session.close()
+        await session.close()
 
 
 @dataclass
@@ -85,7 +91,10 @@ class _Review:
     identity: dict[str, str]
     polling: bool
     replace: bool  # the name already exists: save needs an explicit confirmation
+    existing: Profile | None
     preserves: bool  # the same bot identity: keep its generation and grants
+    revision: str
+    session: str
     expires_at: float
 
 
@@ -129,26 +138,32 @@ class BotOnboarding:
             token, polling, proxy_url(name, route, self.secrets, settings)
         )
 
-    def _check(
-        self, request: Request, form: Any = None, *, mutation: bool = True
-    ) -> tuple[Any, Response | None]:
+    def _check(self, request: Request, *, mutation: bool = True) -> tuple[Any, Response | None]:
         if not self.control._allowed(request, mutation=mutation):
             return None, JSONResponse({"error": "forbidden_origin"}, status_code=403)
         found = self.control._session(request)
         if found is None:
             return None, self.control._locked(request)
-        if form is not None and not hmac.compare_digest(
-            str(form.get("csrf", "")).encode(), found[1].csrf.encode()
-        ):
-            return None, JSONResponse({"error": "invalid_csrf"}, status_code=403)
         return found, None
 
-    def _pending(self, form: Any) -> tuple[str, _Review] | None:
+    async def _post(self, request: Request) -> tuple[Any, dict[str, str], Response | None]:
+        found, denied = self._check(request)
+        if denied is not None:
+            return None, {}, denied
+        body = await self.control._form(request)
+        if isinstance(body, Response):
+            return None, {}, body
+        form = {key: values[0] for key, values in body.items()}
+        if not hmac.compare_digest(form.get("csrf", "").encode(), found[1].csrf.encode()):
+            return None, {}, JSONResponse({"error": "invalid_csrf"}, status_code=403)
+        return found, form, None
+
+    def _pending(self, handle: str, session: str) -> tuple[str, _Review] | None:
         now = self.clock()
         self.reviews = {key: value for key, value in self.reviews.items() if value.expires_at > now}
-        key = _digest(str(form.get("review", "")))
+        key = _digest(handle)
         value = self.reviews.get(key)
-        return (key, value) if value is not None else None
+        return (key, value) if value is not None and value.session == session else None
 
     async def page(self, request: Request) -> Response:
         found, denied = self._check(request, mutation=False)
@@ -157,8 +172,7 @@ class BotOnboarding:
         return self._page(found[1].csrf)
 
     async def review(self, request: Request) -> Response:
-        form = await request.form()
-        found, denied = self._check(request, form)
+        found, form, denied = await self._post(request)
         if denied is not None:
             return denied
         name = str(form.get("profile", "")).strip()
@@ -174,10 +188,16 @@ class BotOnboarding:
             )
         if len(token) > 200 or not TOKEN.fullmatch(token):
             return self._page(found[1].csrf, "That is not a Telegram Bot API token.", 422)
+        raw, _ = read_config(self.settings)
+        existing = Settings.load(self.settings.data_dir).profiles.get(name)
         try:
-            info = _sanitised(await self.inspect(token, polling, name))
+            info = _sanitised(await asyncio.wait_for(self.inspect(token, polling, name), 20), token)
         except TeleloomError as error:
-            return self._page(found[1].csrf, f"{error.code}: {error.message}", 422)
+            text = {
+                "webhook_conflict": "webhook_conflict: Telegram still delivers this bot's updates to a webhook. Polling was not enabled.",
+                "auth_failed": "Telegram did not confirm this Bot API token.",
+            }.get(error.code, "Telegram could not verify this token.")
+            return self._page(found[1].csrf, text + " Nothing was saved.", 422)
         except Exception:
             return self._page(
                 found[1].csrf,
@@ -191,52 +211,79 @@ class BotOnboarding:
         while len(self.reviews) >= 8:
             del self.reviews[next(iter(self.reviews))]
         key = secrets.token_urlsafe(24)
-        existing = Settings.load(self.settings.data_dir).profiles.get(name)
         value = _Review(
             name=name,
             token=token,
             identity=info,
             polling=polling,
             replace=existing is not None,
+            existing=existing,
+            revision=revision(raw),
+            session=found[0],
             preserves=existing is not None
             and existing.kind == "bot"
             and existing.identity.get("id") == info["id"],
             expires_at=self.clock() + self.ttl,
         )
-        self.reviews[_digest(key)] = value
+        digest = _digest(key)
+        self.reviews[digest] = value
+        asyncio.get_running_loop().call_later(self.ttl, self.reviews.pop, digest, None)
         return self._review_page(found[1].csrf, key, value)
 
     async def apply(self, request: Request) -> Response:
-        form = await request.form()
-        found, denied = self._check(request, form)
+        found, form, denied = await self._post(request)
         if denied is not None:
             return denied
-        pending = self._pending(form)
+        handle = form.get("review", "")
+        pending = self._pending(handle, found[0])
         if pending is None:
             return self._page(found[1].csrf, PENDING, 410)
         key, value = pending
         if value.replace and form.get("confirm") != "1":
             return self._review_page(
                 found[1].csrf,
-                key,
+                handle,
                 value,
                 f"This replaces profile '{value.name}'. Confirm the replacement explicitly.",
                 status=422,
             )
         self.reviews.pop(key, None)
+        raw, _ = read_config(self.settings)
+        if revision(raw) != value.revision:
+            return self._page(
+                found[1].csrf, "Configuration changed. Review the profile again.", 409
+            )
         note: list[str] = []
+        polling_connected = False
 
         async def body() -> None:
+            raw, _ = read_config(self.settings)
+            if revision(raw) != value.revision:
+                raise TeleloomError(
+                    "stale_revision", "Configuration changed. Review the profile again."
+                )
             note.append(
                 self.commit(value.name, value.token, value.identity, value.polling, value.replace)
                 or ""
             )
+
+        def verify(observed: dict[str, Any]) -> list[str]:
+            nonlocal polling_connected
+            profile = Settings.load(self.settings.data_dir).profiles[value.name]
+            errors = profile_mismatches(observed, value.name, profile)
+            if value.polling and not errors:
+                rows = observed["scope"]["profiles"]
+                polling_connected = any(
+                    item["id"] == value.name and item.get("state") == "connected" for item in rows
+                )
+            return errors
 
         record, error = await transition(
             self.control.lifecycle,
             self.settings,
             {"operation": "bot_login", "profile": value.name},
             body,
+            verify=verify,
         )
         value.token = ""
         if error is not None:
@@ -245,6 +292,8 @@ class BotOnboarding:
                 "transition_in_progress": 409,
                 "transition_blocked": 409,
                 "profile_exists": 409,
+                "stale_revision": 409,
+                "verify_failed": 503,
                 "credentials_unavailable": 503,
             }.get(error.code, 400)
             return self._page(found[1].csrf, f"{error.code}: {error.message}", status)
@@ -262,17 +311,24 @@ class BotOnboarding:
                 f"Owner {owner['owner_id']} answers in this workspace."
                 if owner
                 else "The owner is not running; run teleloom serve to load this profile."
+            )
+            + (
+                " Polling is configured. Startup is still unverified; open teleloom ui to check profile status."
+                if value.polling and not polling_connected
+                else ""
             ),
             200,
             done=True,
         )
 
     async def cancel(self, request: Request) -> Response:
-        form = await request.form()
-        found, denied = self._check(request, form)
+        found, form, denied = await self._post(request)
         if denied is not None:
             return denied
-        self.reviews.clear()
+        pending = self._pending(form.get("review", ""), found[0])
+        if pending is None:
+            return self._page(found[1].csrf, PENDING, 410)
+        self.reviews.pop(pending[0])
         return self._page(found[1].csrf, "Cancelled. No profile or credential was changed.", 200)
 
     def _write(
@@ -280,6 +336,7 @@ class BotOnboarding:
     ) -> None:
         """Runs under control.lock and owner.lock (from `transition`): never a second owner."""
         settings = Settings.load(self.settings.data_dir)
+        _, data = read_config(self.settings)
         existing = settings.profiles.get(name)
         if existing is not None and not replace:
             raise TeleloomError(
@@ -313,16 +370,29 @@ class BotOnboarding:
         previous = self.secrets.get(name, "bot_token")
         self.secrets.set(name, "bot_token", token)
         try:
+            profiles = data.setdefault("profiles", {})
+            if existing is not None and profile.generation == existing.generation:
+                profiles[name].update(
+                    bot_backend="bot_api", api_id=None, identity=info, polling=polling
+                )
+            else:
+                profiles[name] = profile.model_dump(mode="json")
+            write_config(settings, data)
             settings.profiles[name] = profile
-            settings.save()
         except Exception as error:
-            if previous:
-                with suppress(TeleloomError):
+            try:
+                if previous:
                     self.secrets.set(name, "bot_token", previous)
+                else:
+                    self.secrets.delete(name, "bot_token")
+            except TeleloomError:
+                raise TeleloomError(
+                    "rollback_failed",
+                    "The configuration is unchanged, but its OS credential could not be restored.",
+                ) from None
             raise TeleloomError(
                 "save_failed",
-                f"config.json could not be saved ({type(error).__name__}); the previous "
-                "token was restored and no profile changed.",
+                f"config.json could not be saved ({type(error).__name__}); the profile was not changed.",
             ) from None
         self.settings.profiles = settings.profiles
 
@@ -335,7 +405,11 @@ class BotOnboarding:
         status: int = 200,
     ) -> Response:
         policy, grants_by_name = self._policy(value)
-        grants = [grant for grant, chats in grants_by_name.items() if chats]
+        grants = [
+            f"{grant}: {', '.join(chats)}"
+            for grant, chats in grants_by_name.items()
+            if grant != "read" and chats
+        ]
         confirm = (
             f'<p><label><input type="checkbox" name="confirm" value="1"> '
             f"Replace profile <code>{_esc(value.name)}</code> and its stored token. "
@@ -361,22 +435,25 @@ class BotOnboarding:
 <dt>Token</dt><dd>held in this control process only until Apply or Cancel; never shown again</dd>
 </dl>
 <p class="small">{_esc(BOT_LIMIT)}</p>
-{confirm}
 <form method="post" action="/control/bot/apply">
+{confirm}
 <input type="hidden" name="csrf" value="{_esc(csrf)}">
 <input type="hidden" name="review" value="{_esc(key)}">
 <p><button type="submit">Save profile</button></p></form>
 <form method="post" action="/control/bot/cancel">
 <input type="hidden" name="csrf" value="{_esc(csrf)}">
+<input type="hidden" name="review" value="{_esc(key)}">
 <p><button type="submit">Cancel</button></p></form>"""
         return HTMLResponse(self._shell(body), status_code=status, headers=self.control._headers())
 
     def _policy(self, value: _Review) -> tuple[str, dict[str, Any]]:
         """What the saved profile will actually allow: the old grants only survive an unchanged bot."""
-        existing = Settings.load(self.settings.data_dir).profiles.get(value.name)
+        existing = value.existing
         if existing is None or not value.preserves:
-            return "selected", {}
-        return existing.read_mode, existing.grants()
+            return "selected (no chats)", {}
+        read = ", ".join(existing.read_chats) or "no chats"
+        policy = "all chats" if existing.read_mode == "all" else f"selected ({read})"
+        return policy, existing.grants()
 
     def _page(
         self, csrf: str, message: str | None = None, status: int = 200, *, done: bool = False

@@ -7,9 +7,11 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
 from teleloom import control
 from teleloom.build_info import build_info
+from teleloom.cli import app as cli
 from teleloom.config import Settings
 from teleloom.models import Message
 from teleloom.store import Store
@@ -25,6 +27,7 @@ BASE = {
     "profiles": {
         "personal": {
             "kind": "user",
+            "generation": "owner-personal-1",
             "identity": {"id": "7", "name": "Owner"},
             "read_mode": "all",
             "read_chats": [],
@@ -35,7 +38,13 @@ BASE = {
             "file_roots": ["/owner/export"],
             "future_profile_key": {"kept": True},
         },
-        "work": {"kind": "user", "read_mode": "all", "read_chats": [], "send_chats": []},
+        "work": {
+            "kind": "user",
+            "generation": "owner-work-1",
+            "read_mode": "all",
+            "read_chats": [],
+            "send_chats": [],
+        },
     },
 }
 CATALOGUE = [{"name": "messages_get", "summary": "Read messages", "writes": False}]
@@ -107,36 +116,26 @@ def csrf_of(body: str) -> str:
     return body.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
 
-async def review(http, instance, profile, mode, read, send, broadcast, ai) -> str:
-    params: list[tuple[str, str]] = [("profile", profile), ("review", "1"), ("mode", mode)]
-    params += [("read", item) for item in read]
-    params += [("send", item) for item in send]
-    params += [("broadcast", item) for item in broadcast]
-    params += [("ai", item) for item in ai]
-    response = await http.get("/control/policy", params=params)
-    assert response.status_code == 200, response.text
-    return response.text
-
-
-def session_csrf(instance) -> str:
-    return next(iter(instance.sessions.values())).csrf
-
-
-async def apply(http, instance, revision, profile, mode, read, send, broadcast, ai):
-    return await http.post(
-        "/control/policy/apply",
-        data={
-            "csrf": session_csrf(instance),
-            "revision": revision,
-            "profile": profile,
-            "mode": mode,
-            "read": read,
-            "send": send,
-            "broadcast": broadcast,
-            "ai": ai,
-        },
-        headers={"Origin": instance.origin},
-    )
+async def apply(
+    http, instance, revision, profile, mode, read, send, broadcast, ai, *, review_only=False
+):
+    fields = {
+        "csrf": csrf_of((await http.get("/control/policy")).text),
+        "revision": revision,
+        "profile": profile,
+        "mode": mode,
+        "read": read,
+        "send": send,
+        "broadcast": broadcast,
+        "ai": ai,
+    }
+    path = "/control/policy/apply"
+    headers = {"Origin": instance.origin}
+    reviewed = await http.post(path, data={**fields, "review": "1"}, headers=headers)
+    if review_only or reviewed.status_code != 200:
+        return reviewed
+    key = reviewed.text.split('name="reviewed" value="', 1)[1].split('"', 1)[0]
+    return await http.post(path, data={**fields, "reviewed": key}, headers=headers)
 
 
 @pytest.mark.asyncio
@@ -166,18 +165,17 @@ async def test_policy_needs_the_owner_launch_and_review_shows_the_exact_diff(tmp
                 headers={"Origin": instance.origin},
             )
         ).status_code == 204
-        review = await http.get(
-            "/control/policy",
-            params=[
-                ("profile", "personal"),
-                ("review", "1"),
-                ("mode", "selected"),
-                ("read", "100"),
-                ("read", "-1001234567890"),
-                ("send", "100"),
-                ("broadcast", "100"),
-                ("ai", "100"),
-            ],
+        review = await apply(
+            http,
+            instance,
+            digest(tmp_path),
+            "personal",
+            "selected",
+            ["100\r\n-1001234567890"],
+            ["100"],
+            ["100"],
+            ["100"],
+            review_only=True,
         )
         assert review.status_code == 200, review.text
         assert (
@@ -188,14 +186,17 @@ async def test_policy_needs_the_owner_launch_and_review_shows_the_exact_diff(tmp
         assert "profiles.ai: [] -&gt; [&quot;100&quot;]" in review.text
         assert "profiles.broadcast" not in review.text  # unchanged grants are absent from the diff
 
-        invalid = await http.get(
-            "/control/policy",
-            params=[
-                ("profile", "personal"),
-                ("review", "1"),
-                ("mode", "selected"),
-                ("read", "00100"),
-            ],
+        invalid = await apply(
+            http,
+            instance,
+            digest(tmp_path),
+            "personal",
+            "selected",
+            ["00100"],
+            [],
+            [],
+            [],
+            review_only=True,
         )
         assert invalid.status_code == 422 and "invalid_chat_id" in invalid.text
 
@@ -260,7 +261,7 @@ async def test_apply_writes_only_five_keys_verifies_and_is_idempotent(tmp_path, 
         ("selected", ["+100"], [], "invalid_chat_id"),
         ("selected", ["100.0"], [], "invalid_chat_id"),
         ("selected", ["-0"], [], "invalid_chat_id"),
-        ("selected", [], ["100"], "grant_not_readable"),
+        ("selected", [], ["200"], "grant_not_readable"),
         ("everything", ["100"], [], "invalid_read_mode"),
     ],
 )
@@ -316,7 +317,7 @@ def no_connection(*args):
 
 
 @pytest.mark.asyncio
-async def test_revoked_policy_denies_readers_and_frozen_job_evidence(tmp_path):
+async def test_revoked_policy_denies_readers_and_frozen_job_evidence(tmp_path, monkeypatch):
     stored = json.loads(json.dumps(BASE))
     stored["exposure_mode"] = "read-only"
     stored["profiles"]["personal"]["read_mode"] = "selected"
@@ -352,12 +353,17 @@ async def test_revoked_policy_denies_readers_and_frozen_job_evidence(tmp_path):
             "/control/session", json={"bootstrap": fragment}, headers={"Origin": instance.origin}
         )
         revoked = await apply(
-            http, instance, digest(tmp_path), "personal", "selected", [], [], [], []
+            http, instance, digest(tmp_path), "personal", "selected", [], ["100"], ["100"], []
         )
         assert revoked.status_code == 200, revoked.text
         assert instance.lifecycle.stopped == 1
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert stored["profiles"]["personal"]["read_chats"] == []
+    assert stored["profiles"]["personal"]["send_chats"] == ["100"]
+    monkeypatch.setenv("TELELOOM_DATA_DIR", str(tmp_path))
+    listed = CliRunner().invoke(cli, ["profile", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert json.loads(listed.output)["personal"]["read_chats"] == []
     assert stored["profiles"]["work"]["read_mode"] == "all"
 
     # The same public readers and the earlier frozen job now refuse that evidence.
@@ -388,4 +394,39 @@ async def test_revoked_policy_denies_readers_and_frozen_job_evidence(tmp_path):
         other = data(await mcp.call_tool("server_status", {}))
         grants = {p["id"]: p["grants"] for p in other["data"]["scope"]["profiles"]}
         assert grants["personal"]["read"] == {"mode": "selected", "chat_ids": []}
+        assert grants["personal"]["send"] == [] and grants["personal"]["broadcast"] == []
+        assert not any(
+            "policy" in tool.name or "grant" in tool.name for tool in (await mcp.list_tools()).tools
+        )
         assert grants["work"]["read"] == {"mode": "all", "chat_ids": []}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=instance), base_url=instance.origin
+    ) as http:
+        fragment = urlsplit(instance.issue_bootstrap()["url"]).fragment
+        assert (
+            await http.post(
+                "/control/session",
+                json={"bootstrap": fragment},
+                headers={"Origin": instance.origin},
+            )
+        ).status_code == 204
+        restored = await apply(
+            http, instance, digest(tmp_path), "personal", "selected", ["100"], ["100"], ["100"], []
+        )
+        assert restored.status_code == 200, restored.text
+    settings = Settings.load(tmp_path)
+    async with running(settings, no_connection) as app, client(app, settings) as mcp:
+        recovered = data(
+            await mcp.call_tool(
+                "jobs_results",
+                {
+                    "profile_id": "personal",
+                    "job_id": job_id,
+                    "evidence_ref": reference,
+                    "message_keys": [{"chat_id": "100", "message_id": "10"}],
+                },
+            )
+        )
+        assert recovered["ok"], recovered
+        assert "100 alpha" in json.dumps(recovered)

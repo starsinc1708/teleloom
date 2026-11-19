@@ -27,7 +27,7 @@ _ID = re.compile(r"-?[1-9][0-9]{0,18}")
 def _ids(tokens: list[str] | str) -> list[str]:
     """Exact decimal chat IDs only; leading zeros, signs other than '-' and text are refused."""
     if isinstance(tokens, str):
-        tokens = re.split(r"[\s,]+", tokens)
+        tokens = [tokens]
     found: list[str] = []
     for token in tokens:
         token = token.strip()
@@ -73,11 +73,16 @@ def validated(
         )
     if mode not in MODES:
         raise TeleloomError("invalid_read_mode", "Choose read mode all or selected.")
-    read = _ids(tokens.get("read") or []) if mode == "selected" else []
-    grants = {grant: _ids(tokens.get(grant) or []) for grant in GRANTS}
+
+    def field(key: str) -> list[str]:
+        return _ids(re.split(r"[\s,]+", " ".join(tokens.get(key) or [])))
+
+    read = field("read") if mode == "selected" else []
+    grants = {grant: field(grant) for grant in GRANTS}
     if mode == "selected":
+        old = current(data, name)
         for grant, chats in grants.items():
-            outside = [chat for chat in chats if chat not in read]
+            outside = [chat for chat in chats if chat not in read and chat not in old[grant]]
             if outside:
                 raise TeleloomError(
                     "grant_not_readable",
@@ -122,10 +127,16 @@ def mismatches(
     if reported is None:
         return found + [f"the owner does not report profile {name}"]
     grants = reported.get("grants") or {}
+    expected = dict(proposed)
+    if proposed["read"]["mode"] == "selected":
+        for grant in GRANTS:
+            expected[grant] = [
+                chat for chat in proposed[grant] if chat in proposed["read"]["chat_ids"]
+            ]
     return found + [
         f"profile {name} reports {key}={json.dumps(grants.get(key), ensure_ascii=False)} "
         f"instead of {json.dumps(value, ensure_ascii=False)}"
-        for key, value in proposed.items()
+        for key, value in expected.items()
         if grants.get(key) != value
     ]
 
@@ -176,8 +187,18 @@ async def apply(instance: Any, request: Request) -> Response:
     csrf = found[1].csrf
     if not hmac.compare_digest((form.get("csrf") or [""])[0].encode(), csrf.encode()):
         return JSONResponse({"error": "invalid_csrf"}, status_code=403)
-    _, data = read_config(instance.settings)
+    raw, data = read_config(instance.settings)
+    digest = (form.get("revision") or [""])[0]
     name = (form.get("profile") or [""])[0]
+    if digest != revision(raw):
+        return _page(
+            instance,
+            request,
+            csrf,
+            name=name,
+            message="This editor is stale. Review the current policy again.",
+            status=409,
+        )
     try:
         proposed = validated(
             data,
@@ -194,9 +215,24 @@ async def apply(instance: Any, request: Request) -> Response:
             message=f"{error.code}: {error.message}",
             status=422,
         )
-    return await instance._transition(
-        (form.get("revision") or [""])[0], change(instance.settings, name, proposed), csrf
-    )
+    reviewed = _review_key(found[0], digest, name, proposed)
+    if form.get("review") == ["1"]:
+        return _page(instance, request, csrf, name=name, proposal=proposed, reviewed=reviewed)
+    if not hmac.compare_digest((form.get("reviewed") or [""])[0].encode(), reviewed.encode()):
+        return _page(
+            instance,
+            request,
+            csrf,
+            name=name,
+            message="Review the exact diff before applying.",
+            status=409,
+        )
+    return await instance._transition(digest, change(instance.settings, name, proposed), csrf)
+
+
+def _review_key(session_key: str, digest: str, name: str, proposed: dict[str, Any]) -> str:
+    payload = json.dumps([digest, name, proposed], sort_keys=True).encode()
+    return hmac.digest(session_key.encode(), payload, "sha256").hex()
 
 
 def _page(
@@ -207,29 +243,17 @@ def _page(
     name: str | None = None,
     message: str | None = None,
     status: int = 200,
+    proposal: dict[str, Any] | None = None,
+    reviewed: str = "",
 ) -> Response:
     raw, data = read_config(instance.settings)
     profiles = sorted((data.get("profiles") or {}).keys())
     name = name or request.query_params.get("profile") or (profiles[0] if profiles else "")
     if name not in profiles:
         name = ""
-    reviewed = bool(name) and request.query_params.get("review") == "1"
     before = current(data, name)
-    after = before
-    changes: list[str] = []
-    if reviewed:
-        try:
-            after = validated(
-                data,
-                name,
-                request.query_params.get("mode", ""),
-                {key: request.query_params.getlist(key) for key in ("read", *GRANTS)},
-            )
-            changes = diff(before, after)
-        except TeleloomError as error:
-            reviewed = False
-            message = message or f"{error.code}: {error.message}"
-            status = 422
+    after = proposal if proposal is not None else before
+    changes = diff(before, after)
     return HTMLResponse(
         _html(
             instance,
@@ -269,7 +293,7 @@ def _html(
     before: dict[str, Any],
     after: dict[str, Any],
     changes: list[str],
-    reviewed: bool,
+    reviewed: str,
     digest: str,
     csrf: str,
     message: str | None,
@@ -287,7 +311,10 @@ def _html(
         ""
         if not name
         else (
-            f'<select name="profile" aria-label="Profile">{options}</select>'
+            f'<input type="hidden" name="profile" value="{_esc(name)}">'
+            f'<input type="hidden" name="csrf" value="{_esc(csrf)}">'
+            f'<input type="hidden" name="revision" value="{_esc(digest)}">'
+            f"<p>Editing <strong>{_esc(name)}</strong></p>"
             "<fieldset><legend>Read policy</legend><p>"
             + modes
             + "</p></fieldset>"
@@ -319,7 +346,7 @@ def _html(
     applied = "".join(
         f'<input type="hidden" name="{key}" value="{_esc(value)}">'
         for key in ("read", "send", "broadcast", "ai")
-        for value in after[key]
+        for value in (after["read"]["chat_ids"] if key == "read" else after[key])
     )
     review = (
         '<section aria-labelledby="diff"><h2 id="diff">Exact diff</h2><ul>'
@@ -333,6 +360,7 @@ def _html(
         f'<input type="hidden" name="revision" value="{_esc(digest)}">'
         f'<input type="hidden" name="profile" value="{_esc(name)}">'
         f'<input type="hidden" name="mode" value="{_esc(after["read"]["mode"])}">'
+        f'<input type="hidden" name="reviewed" value="{reviewed}">'
         + applied
         + '<p><button type="submit"'
         + ("" if changes else " disabled")
@@ -363,10 +391,12 @@ fieldset{{border:1px solid #d8d3c7;margin-top:1.5em}}legend{{font-weight:600}}
 <h1>Profile read policy and grants</h1>
 {result}
 <p class="small">Configuration revision <code>{_esc(digest)}</code> · <a href="/control">Tool exposure</a></p>
-<form method="get" action="/control/policy">{selected or ('<p role="status">Choose one of the configured profiles.</p>' if profiles else '<p role="status">No profiles are configured. Run teleloom auth user or auth bot first.</p>')}</form>
+<form method="get" action="/control/policy">{f'<label>Profile <select name="profile">{options}</select></label> <button>Load profile</button>' if profiles else ""}</form>
+<form method="post" action="/control/policy/apply">{selected or ('<p role="status">Choose one of the configured profiles.</p>' if profiles else '<p role="status">No profiles are configured. Run teleloom auth user or auth bot first.</p>')}</form>
 {review}
 <p class="small">Apply stops the owner, writes only read_mode, read_chats, send_chats,
 broadcast_chats and jev_chats of the chosen profile, then verifies the restarted owner's own
 report. Grants are separate decisions: one never enables another, and a scheduled
-owner-authorized send is not a grant. Active jobs and unknown deliveries refuse the change.</p>
+owner-authorized send is not a grant. A saved grant outside selected chats remains inactive.
+Active jobs and unknown deliveries refuse the change.</p>
 </main></body></html>"""
