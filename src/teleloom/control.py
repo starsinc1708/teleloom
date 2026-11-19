@@ -197,6 +197,11 @@ def revision(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _exposure_review_key(session_key: str, digest: str, mode: str, tools: list[str]) -> str:
+    payload = json.dumps(["exposure", digest, mode, tools]).encode()
+    return hmac.digest(session_key.encode(), payload, "sha256").hex()
+
+
 def exposure(data: dict[str, Any]) -> dict[str, Any]:
     mode = data.get("exposure_mode", "all")
     tools = data.get("exposed_tools", [])
@@ -686,6 +691,7 @@ class Control:
         if found is None:
             return self._locked(request)
         raw, data = read_config(self.settings)
+        digest = revision(raw)
         current = exposure(data)
         proposed = current
         reviewed = request.query_params.get("review") == "1"
@@ -705,7 +711,10 @@ class Control:
                 current=current,
                 proposed=proposed,
                 changes=diff(current, proposed["mode"], proposed["tools"]) if reviewed else [],
-                digest=revision(raw),
+                digest=digest,
+                reviewed=_exposure_review_key(found[0], digest, proposed["mode"], proposed["tools"])
+                if reviewed
+                else "",
                 catalogue=self.catalogue,
                 record=record(self.settings),
                 blockers=blockers(self.settings),
@@ -735,6 +744,13 @@ class Control:
             )
         except TeleloomError as error:
             return self._render(422, f"{error.code}: {error.message}", found[1].csrf)
+        submitted = (form.get("revision") or [""])[0]
+        reviewed = (form.get("reviewed") or [""])[0]
+        expected = _exposure_review_key(found[0], submitted, mode, tools)
+        if not hmac.compare_digest(reviewed.encode(), expected.encode()):
+            return self._render(
+                409, "Review the exact diff before applying this change.", found[1].csrf
+            )
         settings = self.settings
         change = Change(
             proposed={"mode": mode, "tools": tools},
@@ -749,7 +765,7 @@ class Control:
                 "Reconnect every MCP client to refresh its cached tool discovery."
             ),
         )
-        return await self._transition((form.get("revision") or [""])[0], change, found[1].csrf)
+        return await self._transition(submitted, change, found[1].csrf)
 
     async def _form(self, request: Request, limit: int = 16384) -> dict[str, list[str]] | Response:
         """Bounded form body: a missing or lying Content-Length cannot grow the read."""
@@ -1181,6 +1197,7 @@ def _control_html(
     owner_up: bool,
     csrf: str,
     message: str | None,
+    reviewed: str = "",
 ) -> str:
     build = build_info()
     tools = "".join(
@@ -1203,6 +1220,7 @@ def _control_html(
         + '<form method="post" action="/control/apply">'
         + f'<input type="hidden" name="csrf" value="{_esc(csrf)}">'
         + f'<input type="hidden" name="revision" value="{_esc(digest)}">'
+        + f'<input type="hidden" name="reviewed" value="{_esc(reviewed)}">'
         + f'<input type="hidden" name="mode" value="{_esc(proposed["mode"])}">'
         + "".join(
             f'<input type="hidden" name="tools" value="{_esc(name)}">' for name in proposed["tools"]

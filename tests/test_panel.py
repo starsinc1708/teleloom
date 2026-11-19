@@ -392,7 +392,7 @@ async def test_control_cli_issues_a_separate_one_use_bootstrap(tmp_path, monkeyp
             assert "exposure_mode: all -&gt; selected" in review.text
             fields = {
                 key: review.text.split(f'name="{key}" value="', 1)[1].split('"', 1)[0]
-                for key in ("csrf", "revision")
+                for key in ("csrf", "revision", "reviewed")
             }
             form = {**fields, "mode": "selected", "tools": ["messages_get"]}
             accepted = await client.post("/control/apply", headers=headers, data=form)
