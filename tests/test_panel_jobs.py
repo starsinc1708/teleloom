@@ -396,7 +396,9 @@ async def test_chromium_pages_durable_receipts_after_owner_restart_and_revocatio
         )
         assert issued.ok
         await page.goto((await issued.json())["url"])
-        await page.wait_for_url("**/ui")
+        await playwright.expect(
+            page.get_by_role("heading", name="Workspace status")
+        ).to_be_visible()
 
     async with playwright.async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -435,9 +437,8 @@ async def test_chromium_pages_durable_receipts_after_owner_restart_and_revocatio
                         )
                 runtime.profile_errors["work"] = "connection_error"
                 await sign_in(page)
-                assert (
-                    await page.goto(detail.replace("profile=work", "profile=personal"))
-                ).status == 404
+                foreign = await page.request.get(detail.replace("profile=work", "profile=personal"))
+                assert foreign.status == 404 and "5011" not in await foreign.text()
                 await page.goto(origin + "/ui/jobs")
                 await page.get_by_label("Profile").select_option("work")
                 await page.get_by_label("Type").select_option("delivery")
@@ -476,9 +477,9 @@ async def test_chromium_pages_durable_receipts_after_owner_restart_and_revocatio
                 assert len(runtime.store.jobs()) == 1 and not runtime.adapters
 
             async with running_http(settings, no_telegram, network=True) as restarted:
-                assert (await page.goto(second_page)).status == 401
+                assert (await page.request.get(second_page)).status == 401
                 await sign_in(page)
-                assert (await page.goto(second_page)).status == 200
+                await page.goto(second_page)
                 await playwright.expect(
                     page.get_by_text("Unknown", exact=False).first
                 ).to_be_visible()
@@ -489,8 +490,12 @@ async def test_chromium_pages_durable_receipts_after_owner_restart_and_revocatio
             settings.profiles["work"].read_chats = ["100"]
             async with running_http(settings, no_telegram, network=True) as revoked:
                 await sign_in(page)
-                denied = await page.goto(second_page)
+                denied = await page.request.get(second_page)
                 assert denied.status == 403 and denied.headers["cache-control"] == "no-store"
+                await page.goto(second_page)
+                await playwright.expect(
+                    page.get_by_role("alert").filter(has_text="read policy does not allow")
+                ).to_be_visible()
                 await playwright.expect(page.get_by_text("5011", exact=True)).to_have_count(0)
                 await page.goto(origin + "/ui/jobs")
                 await playwright.expect(
