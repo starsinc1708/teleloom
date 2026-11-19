@@ -38,7 +38,7 @@ winget install --id astral-sh.uv -e
 Откройте новый PowerShell в выбранном постоянном родительском каталоге:
 
 ```powershell
-git clone --branch v0.5.0 --single-branch https://github.com/starsinc1708/teleloom.git
+git clone --branch v0.6.0 --single-branch https://github.com/starsinc1708/teleloom.git
 Set-Location teleloom
 uv sync --frozen
 uv run teleloom init

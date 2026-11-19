@@ -6,8 +6,7 @@ installed interpreter and `-m teleloom mcp`; the bridge loads credentials itself
 Printing never registers MCP. Explicit `--install` supports OpenCode 2 and Hermes
 through their native CLIs; other clients still require a manual merge.
 
-From a checkout containing native installation support (v0.5.0 only prints fragments),
-choose the command pair for your client:
+Starting with v0.6.0, choose the command pair for your client:
 
 ```sh
 uv run teleloom config client --client opencode --install

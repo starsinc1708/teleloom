@@ -1,7 +1,7 @@
 # Teleloom documentation
 
 Teleloom is a Telegram toolkit with six portable agent skills, 67 MCP tools and a CLI.
-Public version: **v0.5.0**. User guides describe implemented behavior; proposals
+Public version: **v0.6.0**. User guides describe implemented behavior; proposals
 are identified in the [roadmap](roadmap.md).
 
 ## Start here
@@ -32,6 +32,6 @@ contracts; the [capacity study](research/reading-capacity-gate.md) is a dated
 synthetic measurement, not a live Telegram throughput claim.
 
 [Acceptance](acceptance.md) separates automated checks, native discovery and
-untested behavior. [Release notes](releases/v0.5.0.md) describe the first public
+untested behavior. [Release notes](releases/v0.6.0.md) describe the current public
 release. The private development history and its operational logs are not part
 of this repository.

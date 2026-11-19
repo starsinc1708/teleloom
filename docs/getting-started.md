@@ -9,7 +9,7 @@ Install Git and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 Python 3.12–3.14 is supported; uv can provision a supported interpreter.
 
 ```sh
-git clone --branch v0.5.0 --single-branch https://github.com/starsinc1708/teleloom.git
+git clone --branch v0.6.0 --single-branch https://github.com/starsinc1708/teleloom.git
 cd teleloom
 uv sync --frozen
 uv run teleloom init

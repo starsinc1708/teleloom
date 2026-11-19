@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 — 2026-11-19
+
+- Added a protected browser panel for profiles, tool exposure, jobs, delivery
+  receipts, and bounded reading evidence.
+- Added local browser management for profile onboarding, read policies, tool
+  exposure, client setup, named proxies, and optional engines.
+- Added exact, reviewed browser sends and plan-specific owner authorization.
+  Unknown delivery outcomes remain visible for reconciliation.
+- Added native OpenCode 2 and Hermes installation and a private SSH runbook.
+- Fixed exposure review binding, Windows client path matching, proxy credential
+  isolation and IPv6 migration, and transcription endpoint validation.
+
+See the [release notes](docs/releases/v0.6.0.md).
+
 ## 0.5.0 — 2026-10-07
 
 First public release as **Teleloom**, with a clean Git history. Teleloom is a
