@@ -272,7 +272,7 @@ class Onboarding:
         self.flow = LoginFlow(client, timeout=self.timeout)
         self.flow.cancelled = self.cancelled
         self.flow.deadline = time.monotonic() + self.timeout
-        lock = None
+        lock = acquire_session(client.session) if client.session.auth_key else None
         try:
             try:
                 await self.flow._await(client.connect())
@@ -280,7 +280,8 @@ class Onboarding:
                 raise TeleloomError(
                     "auth_timeout", "Connection timed out. Start a new login."
                 ) from None
-            lock = acquire_session(client.session)
+            if lock is None:
+                lock = acquire_session(client.session)
             self.phase = "login"
             identity = await self.flow.run()
             self.phase = "saving"

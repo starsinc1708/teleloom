@@ -1,5 +1,6 @@
 import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -256,17 +257,30 @@ async def test_missing_credential_backend_and_busy_owner_fail_closed(tmp_path):
     assert "newbot:bot_token" not in store.stored
 
 
-async def test_webhook_conflict_is_reported_and_never_changed(tmp_path):
-    panel, _, store, _, app = setup(
-        tmp_path,
-        inspect=FakeBotApi(
-            error=TeleloomError("webhook_conflict", "Telegram still delivers updates to a webhook.")
-        ),
-    )
+async def test_webhook_conflict_is_reported_and_never_changed(tmp_path, monkeypatch):
+    panel, onboarding, store, _, app = setup(tmp_path)
+    calls = []
+
+    class FakeSDK:
+        def __init__(self, token, *, session):
+            assert token == TOKEN
+
+        async def get_me(self):
+            calls.append("get_me")
+            return SimpleNamespace(id=123456789, is_bot=True, username="bot", first_name="Bot")
+
+        async def get_webhook_info(self):
+            calls.append("get_webhook_info")
+            return SimpleNamespace(url="https://owner.example/path")
+
+    monkeypatch.setattr("aiogram.Bot", FakeSDK)
+    onboarding.inspect = onboarding._inspect
     async with signed_in(panel, app) as client:
         csrf = await csrf_of(client)
         response = await review(client, panel, csrf, polling=True)
         assert response.status_code == 422 and "webhook_conflict" in response.text
+        assert TOKEN not in response.text and "owner.example" not in response.text
+    assert calls == ["get_me", "get_webhook_info"]
     assert "newbot:bot_token" not in store.stored
 
 

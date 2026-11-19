@@ -301,6 +301,30 @@ async def test_unknown_profile_and_stale_review_are_refused(tmp_path, browser):
     assert instance.lifecycle.stopped == 0
 
 
+@pytest.mark.asyncio
+async def test_apply_requires_the_same_payload_that_was_reviewed(tmp_path, browser):
+    instance, http = browser
+    fields = {
+        "profile": "personal",
+        "csrf": csrf_of((await http.get("/control/policy")).text),
+        "revision": digest(tmp_path),
+        "mode": "selected",
+        "read": "100",
+    }
+    headers = {"Origin": instance.origin}
+    path = "/control/policy/apply"
+    reviewed = await http.post(path, data={**fields, "review": "1"}, headers=headers)
+    assert reviewed.status_code == 200
+    assert 'name="read" value="100"' in reviewed.text
+    key = reviewed.text.split('name="reviewed" value="', 1)[1].split('"', 1)[0]
+    changed = await http.post(
+        path, data={**fields, "read": "200", "reviewed": key}, headers=headers
+    )
+    assert changed.status_code == 409
+    assert instance.lifecycle.stopped == 0
+    assert Settings.load(tmp_path).profiles["personal"].read_mode == "all"
+
+
 def seed(directory):
     store = Store(directory)
     store.save_messages(

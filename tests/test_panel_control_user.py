@@ -529,3 +529,28 @@ async def test_control_shutdown_cancels_qr_and_restores_owner(tmp_path):
     assert instance.user.snapshot()["phase"] == "cancelled"
     assert lifecycle.stopped == 1 and len(lifecycle.started) == 1
     assert "newbie" not in Settings.load(tmp_path).profiles
+
+
+@pytest.mark.asyncio
+async def test_conflicting_authorization_does_not_open_a_second_connection(tmp_path, monkeypatch):
+    from teleloom.session_state import acquire_session
+
+    config(tmp_path)
+    telegram = FakeTelegram()
+    instance, lifecycle = make(
+        tmp_path, telegram=telegram, stored={"newbie:api_id": "1", "newbie:api_hash": SECRET_HASH}
+    )
+
+    async def unexpected_connect():
+        pytest.fail("The authorization is already owned by another process.")
+
+    monkeypatch.setattr(telegram, "connect", unexpected_connect)
+    with acquire_session(telegram.session):
+        async with client_for(instance) as client:
+            await sign_in(client, instance)
+            assert (await start_login(client, instance, name="newbie")).status_code == 202
+            await asyncio.wait_for(instance.user.task, 3)
+            result = (await client.get("/control/user/state")).json()
+            assert result["phase"] == "failed" and "session_in_use" in result["message"]
+    assert "newbie" not in Settings.load(tmp_path).profiles
+    assert len(lifecycle.started) == 1
