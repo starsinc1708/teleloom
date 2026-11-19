@@ -97,6 +97,7 @@ async def test_bootstrap_is_one_time_and_session_has_strict_cookie_csrf_and_logo
 
             url = await issue(client)
             assert "/ui/open#" in url and TOKEN not in url
+            assert (await client.get("/ui/open")).headers["referrer-policy"] == "no-referrer"
             fragment = urlsplit(url).fragment
 
             rejected = await client.post(
