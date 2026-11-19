@@ -214,7 +214,8 @@ async def test_probe_timeout_has_safe_recovery_and_no_automatic_retry(tmp_path, 
         assert probe["error"]["phase"] == phase
         assert probe["error"]["code"] == "timeout"
         assert "unknown delivery" in probe["error"]["next_action"]
-        assert 0.04 <= sum(value or 0 for value in probe["timings_seconds"].values()) < 1
+        assert probe["timeout_seconds"] == arguments["timeout_seconds"]
+        assert 0 < probe["timings_seconds"][phase] < 1
         assert sdk.connections == 1
         assert sdk.reads == (1 if phase == "read" else 0)
         sdk.stall = False

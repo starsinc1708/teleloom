@@ -1,11 +1,12 @@
 import asyncio
 import contextlib
 import io
+import json
 import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -19,7 +20,7 @@ from telethon import TelegramClient, errors, events, functions, types, utils
 from telethon.sessions import StringSession
 
 from . import __version__
-from .config import Profile
+from .config import Profile, Settings
 from .models import Chat, Message, TeleloomError, utcnow
 from .secrets import Secrets
 from .store import Store
@@ -127,6 +128,49 @@ class Adapter(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def named_proxy_credentials(secret: str, protocol: str) -> tuple[str, str]:
+    try:
+        stored = json.loads(secret) if secret else {}
+    except ValueError:
+        stored = None
+    if not isinstance(stored, dict) or any(
+        not isinstance(stored.get(field, ""), str) for field in ("username", "password")
+    ):
+        raise TeleloomError("invalid_proxy", "The named proxy credential could not be read.")
+    username = stored.get("username", "")
+    password = stored.get("password", "")
+    if password and (not username or protocol == "socks4"):
+        raise TeleloomError(
+            "invalid_proxy", "The named proxy credential is invalid for its protocol."
+        )
+    return username, password
+
+
+def proxy_url(
+    profile_id: str,
+    profile: Profile,
+    credentials: Secrets,
+    settings: Settings | None = None,
+) -> str | None:
+    """Resolve one profile's route; a named assignment never falls back to direct.
+
+    The endpoint's username/password live in Secrets under the shared 'proxy'
+    namespace as JSON, so config, exports and results never contain them.
+    """
+    if profile.proxy is None:
+        return credentials.get(profile_id, "proxy")
+    endpoint = settings.proxies.get(profile.proxy) if settings is not None else None
+    if endpoint is None:
+        raise TeleloomError(
+            "proxy_unavailable",
+            f"Named proxy '{profile.proxy}' is not configured; refusing a direct connection.",
+        )
+    secret = credentials.get("proxy", profile.proxy) or ""
+    username, password = named_proxy_credentials(secret, endpoint.protocol)
+    auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username else ""
+    return f"{endpoint.protocol}://{auth}{endpoint.host}:{endpoint.port}"
+
+
 def user_client(
     profile_id: str,
     profile: Profile,
@@ -134,6 +178,7 @@ def user_client(
     *,
     new: bool = False,
     store: Store | None = None,
+    settings: Settings | None = None,
 ) -> TelegramClient:
     api_id = profile.api_id
     if not api_id:
@@ -143,7 +188,7 @@ def user_client(
         except ValueError:
             raise TeleloomError("credentials_invalid", "API ID must be an integer.") from None
     session = "" if new else credentials.require(profile_id, "session")
-    proxy = credentials.get(profile_id, "proxy")
+    proxy = proxy_url(profile_id, profile, credentials, settings)
     kwargs: dict[str, Any] = {}
     if proxy:
         parsed = urlparse(proxy)
@@ -160,8 +205,12 @@ def user_client(
             "proxy_type": parsed.scheme,
             "addr": parsed.hostname,
             "port": parsed.port,
-            "username": parsed.username,
-            "password": parsed.password,
+            "username": unquote(parsed.username)
+            if profile.proxy and parsed.username
+            else parsed.username,
+            "password": unquote(parsed.password)
+            if profile.proxy and parsed.password
+            else parsed.password,
             "rdns": True,
         }
     from .session_state import SavedMetadataSession
@@ -341,12 +390,17 @@ class UserAdapter:
         return await user_account_read(self, operation, offset)
 
     def __init__(
-        self, profile_id: str, profile: Profile, store: Store, credentials: Secrets
+        self,
+        profile_id: str,
+        profile: Profile,
+        store: Store,
+        credentials: Secrets,
+        settings: Settings | None = None,
     ) -> None:
         self.profile_id = profile_id
         self.profile = profile
         self.store = store
-        self.client = user_client(profile_id, profile, credentials, store=store)
+        self.client = user_client(profile_id, profile, credentials, store=store, settings=settings)
         self.session_lease: Any = None
 
     async def start(self) -> None:
@@ -1364,12 +1418,17 @@ class BotAdapter:
         return await bot_account_read(self, operation, offset)
 
     def __init__(
-        self, profile_id: str, profile: Profile, store: Store, credentials: Secrets
+        self,
+        profile_id: str,
+        profile: Profile,
+        store: Store,
+        credentials: Secrets,
+        settings: Settings | None = None,
     ) -> None:
         self.profile_id = profile_id
         self.profile = profile
         self.store = store
-        proxy = credentials.get(profile_id, "proxy")
+        proxy = proxy_url(profile_id, profile, credentials, settings)
         self.bot = Bot(
             credentials.require(profile_id, "bot_token"), session=AiohttpSession(proxy=proxy)
         )
@@ -1843,13 +1902,20 @@ class BotAdapter:
         return str(raw.message_id)
 
 
-def make_adapter(profile_id: str, profile: Profile, store: Store, credentials: Secrets) -> Adapter:
+def make_adapter(
+    profile_id: str,
+    profile: Profile,
+    store: Store,
+    credentials: Secrets,
+    *,
+    settings: Settings | None = None,
+) -> Adapter:
     if profile.kind == "bot" and profile.bot_backend == "mtproto":
         from .bot_mtproto import MTProtoBotAdapter
 
-        return MTProtoBotAdapter(profile_id, profile, store, credentials)
+        return MTProtoBotAdapter(profile_id, profile, store, credentials, settings=settings)
     return (
-        UserAdapter(profile_id, profile, store, credentials)
+        UserAdapter(profile_id, profile, store, credentials, settings=settings)
         if profile.kind == "user"
-        else BotAdapter(profile_id, profile, store, credentials)
+        else BotAdapter(profile_id, profile, store, credentials, settings=settings)
     )

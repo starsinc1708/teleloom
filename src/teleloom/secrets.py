@@ -1,4 +1,5 @@
 import os
+from contextlib import suppress
 from typing import Any
 
 import keyring
@@ -69,3 +70,11 @@ class Secrets:
             raise TeleloomError(
                 "credentials_unavailable", "Cannot save credentials in the OS keyring."
             ) from None
+
+    def delete(self, profile: str, name: str) -> None:
+        """Roll back a credential this process just wrote; a missing key is already rolled back."""
+        backend = self.backend()
+        if backend is None:
+            return
+        with suppress(KeyringError):
+            backend.delete_password("teleloom", f"{profile}:{name}")

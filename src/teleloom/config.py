@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import uuid
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Literal
 
@@ -72,6 +73,7 @@ class Limits(BaseModel):
 
 
 class TranscriptionConfig(BaseModel):
+    provider: Literal["telegram", "local", "openai", "groq"] = "local"
     local_model_path: str | None = None
     openai_endpoint: str | None = None
     openai_model: str = Field(default="whisper-1", min_length=1, max_length=200)
@@ -80,9 +82,31 @@ class TranscriptionConfig(BaseModel):
     external_daily_bytes: int = Field(default=0, ge=0, le=1_000_000_000)
 
 
+class ProxyEndpoint(BaseModel):
+    """A named route without its credential; only Secrets holds the username/password."""
+
+    protocol: Literal["socks5", "socks4", "http"]
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        labels = value.split(".")
+        if all(label.isascii() and label.isdigit() for label in labels):
+            IPv4Address(value)
+        elif any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError("Proxy host must be a bare hostname or IPv4 address, without scheme.")
+        return value
+
+
 class Profile(BaseModel):
     kind: Literal["user", "bot"]
     bot_backend: Literal["bot_api", "mtproto"] = "bot_api"
+    proxy: str | None = None
     generation: str = Field(default_factory=lambda: uuid.uuid4().hex)
     api_id: int | None = None
     identity: dict[str, str] = Field(default_factory=dict)
@@ -139,6 +163,7 @@ class Settings(BaseModel):
     port: int = Field(default=8765, ge=1024, le=65535)
     read_timeout_seconds: float = Field(default=30, ge=0.05, le=40)
     profiles: dict[str, Profile] = Field(default_factory=dict)
+    proxies: dict[str, ProxyEndpoint] = Field(default_factory=dict)
     limits: Limits = Field(default_factory=Limits)
     jev_model: str = "jev-latest"
     exposure_mode: Literal["all", "read-only", "selected"] = "all"
@@ -185,5 +210,14 @@ def validate_name(name: str) -> str:
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,47}", name):
         raise ValueError(
             "Profile names must start with a lowercase letter and use letters, digits or underscores."
+        )
+    return name
+
+
+def validate_proxy_name(name: str) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
+        raise ValueError(
+            "Proxy names must start with a lowercase letter and use letters, digits, "
+            "underscores or hyphens."
         )
     return name

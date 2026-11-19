@@ -842,6 +842,32 @@ the session and an owner restart invalidates it. A passive visit grants nothing.
 The panel never exposes the MCP token or Telegram credentials and never reads
 Telegram or calls AI. MCP tools, grants and `/mcp` authentication are unchanged.
 See [ADR 0012](adr/0012-browser-panel-session.md).
+
+`teleloom control [--no-open]` is the owner-only management process. It is a
+separate foreground local process started by that explicit command — never the
+daemon, never a route under `/mcp`, and never authorized by the MCP bearer. It
+binds an ephemeral loopback port with its own one-time bootstrap, `/control`
+cookie and CSRF token, and shows the current `config.json` byte revision, the
+exact `exposure_mode`/`exposed_tools` diff for a reviewed selection, and the last
+transition. Apply refuses a stale revision (409), queued/running jobs and any
+`sending`/`unknown` delivery or transcription receipt; it then stops the owner,
+rechecks the revision and blockers under `owner.lock`, rewrites only those two
+keys through the atomic tmp+replace path (all other and unknown stored fields are
+preserved), starts the owner under a one-use handoff and reports the observed
+owner/workspace/build identity. While a transition is live, login, configuration
+writes, `teleloom serve` and bridge auto-start refuse with
+`transition_in_progress`; a crashed transition leaves a durable record that the
+next action reports as `abandoned` instead of replaying it. An unchanged
+configuration is a no-op, and clients must reconnect to refresh discovery. See
+[ADR 0013](adr/0013-owner-management.md).
+`/control/policy` edits one chosen profile's `read_mode` and exact numeric
+`read_chats` plus the separate `send`, `broadcast` and `ai` grants. It accepts
+only IDs the owner types — never a dialog picker, folder, username or
+profile-name inference — shows the exact per-key diff and Apply writes those five
+keys and nothing else through the same transition, revision and verification
+path. Selected reads with an empty list allow no chat; a grant may only name a
+chat the profile can already read. Revoked chats then refuse the public readers,
+job results and exports that used to include them, while stored originals remain.
 To open a panel of an already provisioned remote owner, follow
 [the private SSH tunnel runbook](gui-ssh.md): one loopback forward whose local
 port equals the remote owner port, native host-key verification and a bootstrap
@@ -1000,10 +1026,11 @@ by `tests/test_event_workflows.py` with fake SDK ingress and no delivery executi
 ## Transcription
 
 `transcription_capabilities(profile_id)` describes user/bot/provider restrictions.
-`transcription_start(profile_id, chat_id, message_id, provider="local"|"telegram"|
+`transcription_start(profile_id, chat_id, message_id, provider=null|"local"|"telegram"|
 "openai"|"groq", allow_external_upload=false, max_calls=1, max_bytes=10000000,
 max_characters=32000, timeout_seconds=30, retention_hours=24)` selects one exact
-audio/video message; consume the job through the same jobs workflow. The owner
+audio/video message; consume the job through the same jobs workflow. An omitted provider
+uses the profile's stored choice (local when unset); an explicit provider wins. The owner
 allows transcription with `--scope transcription`. Configure models/endpoints and
 daily external call/byte limits through `teleloom profile transcription PROFILE`.
 Persisted jobs recheck tool exposure before work and resume. Read-only exposure
@@ -1057,6 +1084,10 @@ revoked jobs remain stored but their evidence cannot be retrieved until allowed.
 workflows. `--mode selected --tool messages_get --tool profiles_list` exposes
 exactly those named tools, including dispatch. Unknown names fail owner startup.
 Restart the owner and reconnect clients after changing either configuration.
+`teleloom control` performs the same change with a review/Apply step and a
+verified restart; it validates selected names against the running owner's own
+catalogue. Both write through the same raw-document path, so unrelated and
+unknown `config.json` fields survive.
 
 One Telegram authentication session can have one connection owner across local
 data directories. Entity/update metadata survives restart in private SQLite;

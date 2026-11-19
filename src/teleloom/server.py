@@ -217,7 +217,7 @@ def create_server(
         profile_id: str,
         chat_id: str,
         message_id: str,
-        provider: Literal["local", "telegram", "openai", "groq"] = "local",
+        provider: Literal["local", "telegram", "openai", "groq"] | None = None,
         allow_external_upload: bool = False,
         max_calls: Annotated[int, Field(ge=0, le=1)] = 1,
         max_bytes: Annotated[int, Field(ge=1, le=25_000_000)] = 10_000_000,
@@ -225,7 +225,7 @@ def create_server(
         timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 30,
         retention_hours: Annotated[int, Field(ge=1, le=168)] = 24,
     ) -> ToolResult:
-        """Transcribe one selected message in a bounded durable job. External AUDIO upload needs owner opt-in and explicit call consent/budget. Cache is untrusted enrichment; no automatic paid retries."""
+        """Transcribe one selected message in a bounded durable job. Provider defaults to the profile's stored choice (local when unset); an explicit provider wins. External AUDIO upload needs owner opt-in and explicit call consent/budget. Cache is untrusted enrichment; no automatic paid retries."""
         return await call(
             lambda: runtime.transcription.start(
                 profile_id,

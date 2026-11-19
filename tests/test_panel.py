@@ -347,3 +347,86 @@ def test_installed_ui_cli_issues_one_bootstrap_over_real_http(tmp_path):
     finally:
         stopped = asyncio.run(run_cli([sys.executable, "-m", "teleloom", "stop"], env))
         assert stopped.returncode == 0, stopped.stderr
+
+
+@pytest.mark.process_e2e
+@pytest.mark.asyncio
+async def test_control_cli_issues_a_separate_one_use_bootstrap(tmp_path, monkeypatch):
+    settings = Settings(data_dir=tmp_path, port=free_port())
+    settings.save()
+    token = "isolated-control-cli-token"
+    env = {**os.environ, "TELELOOM_DATA_DIR": str(tmp_path), "TELELOOM_MCP_TOKEN": token}
+    args = [sys.executable, "-m", "teleloom"]
+    process = await asyncio.create_subprocess_exec(
+        *args, "control", "--no-open", env=env, stdout=asyncio.subprocess.PIPE
+    )
+    try:
+        assert process.stdout is not None
+        line = await asyncio.wait_for(process.stdout.readline(), timeout=35)
+        assert line and token.encode() not in line
+        launch = json.loads(line)
+        url = urlsplit(launch["url"])
+        origin = f"http://{url.netloc}"
+        assert url.hostname == "127.0.0.1" and url.port == launch["port"] != settings.port
+        assert url.path == "/control/open" and launch["opened"] is False
+        async with httpx.AsyncClient(base_url=origin, trust_env=False, timeout=45) as client:
+            assert (
+                await client.get("/control", headers={"Authorization": f"Bearer {token}"})
+            ).status_code == 401
+            headers = {"Origin": origin}
+            body = {"bootstrap": url.fragment}
+            assert (
+                await client.post("/control/session", json=body, headers=headers)
+            ).status_code == 204
+            assert (
+                await client.post("/control/session", json=body, headers=headers)
+            ).status_code == 401
+            assert (await client.get("/control")).status_code == 200
+            assert (await client.get("/mcp")).status_code == 404
+
+            before = await run_cli([*args, "doctor", "--mode", "mcp"], env)
+            assert before.returncode == 0, before.stderr
+            old_owner = json.loads(before.stdout)["daemon"]["owner_id"]
+            selected = [("review", "1"), ("mode", "selected"), ("tools", "messages_get")]
+            review = await client.get("/control", params=selected)
+            assert "exposure_mode: all -&gt; selected" in review.text
+            fields = {
+                key: review.text.split(f'name="{key}" value="', 1)[1].split('"', 1)[0]
+                for key in ("csrf", "revision")
+            }
+            form = {**fields, "mode": "selected", "tools": ["messages_get"]}
+            accepted = await client.post("/control/apply", headers=headers, data=form)
+            assert accepted.status_code == 200 and "Applied and verified" in accepted.text
+            stale = await client.post("/control/apply", headers=headers, data=form)
+            assert stale.status_code == 409 and "stale" in stale.text
+
+            from teleloom.daemon import session
+
+            async with httpx.AsyncClient(
+                base_url=settings.url.removesuffix("/mcp"),
+                headers={"Authorization": f"Bearer {token}"},
+                trust_env=False,
+            ) as owner:
+                report = (await owner.get("/health")).json()
+            assert report["owner_id"] != old_owner
+            assert report["owner_id"] in (await client.get("/control")).text
+            assert "Current exposure</dt><dd><code>selected" in accepted.text
+
+            # Reuse the browser-owner projection to show that the disabled status tool
+            # does not prevent verification, while MCP still enforces the selection.
+            monkeypatch.setenv("TELELOOM_MCP_TOKEN", token)
+            async with session(Settings.load(tmp_path), auto_start=False) as mcp:
+                assert [tool.name for tool in (await mcp.list_tools()).tools] == ["messages_get"]
+            local = await run_cli([*args, "doctor", "--mode", "local"], env)
+            assert local.returncode == 0, local.stderr
+            configuration = json.loads(local.stdout)
+            assert configuration["scope"]["tool_exposure"] == {
+                "mode": "selected",
+                "selected_tools": ["messages_get"],
+            }
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=15)
+        stopped = await run_cli([*args, "stop"], env)
+        assert stopped.returncode == 0, stopped.stderr

@@ -21,11 +21,12 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from filelock import Timeout
 from telethon.sessions import StringSession
 
-from . import __version__
-from .adapters import user_client
+from . import __version__, control_clients
+from .adapters import proxy_url, user_client
 from .auth import code_login, identity, qr_login
 from .config import Limits, Profile, Settings, validate_name
-from .daemon import bridge, ensure_daemon, ownership, session, stop_daemon
+from .control import Control, governed, owner_panel, write_exposure
+from .daemon import bridge, ensure_daemon, session, stop_daemon
 from .daemon import serve as run_daemon
 from .digest import digest_validate_command
 from .evaluation import benchmark_command, evaluate_command
@@ -155,7 +156,7 @@ def root() -> None:
 def init(port: int | None = typer.Option(None, min=1024, max=65535)) -> None:
     """Create private local configuration and an OS-stored MCP token."""
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         if port:
             settings.port = port
         credentials = Secrets()
@@ -181,7 +182,7 @@ def auth_user(
     """Connect by browser/terminal QR, with a private cloud-password prompt if required."""
     validate_name(profile)
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         credentials = Secrets()
         existing = settings.profiles.get(profile)
         if existing and not replace:
@@ -199,14 +200,16 @@ def auth_user(
         raw_api_id = str(api_id) if api_id else credentials.get(profile, "api_id")
         if not raw_api_id:
             raw_api_id = typer.prompt("Telegram API ID", type=str)
-        config = Profile(kind="user", api_id=int(raw_api_id))
+        config = Profile(
+            kind="user", api_id=int(raw_api_id), proxy=existing.proxy if existing else None
+        )
         if not credentials.get(profile, "api_hash"):
             value = typer.prompt("Telegram API hash", hide_input=True)
             credentials.set(profile, "api_hash", value)
             value = ""
 
         async def connect() -> dict[str, str]:
-            client = user_client(profile, config, credentials, new=True)
+            client = user_client(profile, config, credentials, new=True, settings=settings)
             try:
                 await client.connect()
                 result = (
@@ -240,7 +243,7 @@ def auth_bot(
     """Validate a bot token supplied by environment, OS credentials, or a hidden prompt."""
     validate_name(profile)
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         existing = settings.profiles.get(profile)
         if existing and not replace:
             typer.echo(
@@ -257,7 +260,12 @@ def auth_bot(
         existing_token = credentials.get(profile, "bot_token")
         provided = bool(existing_token)
         token: str = existing_token or typer.prompt("Bot token", hide_input=True)
-        config = Profile(kind="bot", bot_backend=backend.value, api_id=api_id)
+        config = Profile(
+            kind="bot",
+            bot_backend=backend.value,
+            api_id=api_id,
+            proxy=existing.proxy if existing else None,
+        )
         if backend == BotBackend.mtproto:
             raw_api_id = str(api_id) if api_id else credentials.get(profile, "api_id")
             config.api_id = int(raw_api_id or typer.prompt("Telegram API ID", type=str))
@@ -270,7 +278,7 @@ def auth_bot(
 
         async def connect() -> dict[str, str]:
             if backend == BotBackend.mtproto:
-                client = user_client(profile, config, credentials, new=True)
+                client = user_client(profile, config, credentials, new=True, settings=settings)
                 try:
                     await client.connect()
                     await client.sign_in(bot_token=token)
@@ -288,7 +296,10 @@ def auth_bot(
                     return identity(user)
                 finally:
                     await client.disconnect()
-            bot = Bot(token, session=AiohttpSession(proxy=credentials.get(profile, "proxy")))
+            bot = Bot(
+                token,
+                session=AiohttpSession(proxy=proxy_url(profile, config, credentials, settings)),
+            )
             try:
                 return identity(await bot.get_me())
             finally:
@@ -332,7 +343,7 @@ def allow(
     """Grant/revoke permission for a canonical numeric chat ID obtained from chat_resolve."""
     number(chat_id)
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         config = settings.profile(profile)
         field = scope.value + "_chats"
         ids = list(getattr(config, field))
@@ -352,7 +363,7 @@ def read_policy(profile: str, mode: str = typer.Option(...)) -> None:
     if mode not in {"all", "selected"}:
         raise TeleloomError("invalid_policy", "Use all or selected.")
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         config = settings.profile(profile)
         config.read_mode = mode  # type: ignore[assignment]
         settings.save()
@@ -370,10 +381,10 @@ def exposure(mode: str = typer.Option(...), tool: list[str] = typer.Option([])) 
             "invalid_exposure", "Use all, read-only, or selected with --tool names."
         )
     settings = Settings.load()
-    with ownership(settings):
-        settings.exposure_mode = mode  # type: ignore[assignment]
-        settings.exposed_tools = list(dict.fromkeys(tool))
-        settings.save()
+    with governed(settings):
+        # Raw-document replace keeps unrelated and unknown stored fields exactly as they are.
+        write_exposure(settings, mode, list(dict.fromkeys(tool)))
+        settings = Settings.load()
     typer.echo(json.dumps({"exposure_mode": mode, "exposed_tools": settings.exposed_tools}))
 
 
@@ -382,7 +393,7 @@ def exposure(mode: str = typer.Option(...), tool: list[str] = typer.Option([])) 
 def polling(profile: str, enable: bool = typer.Option(False, "--enable/--disable")) -> None:
     """Opt into bot polling; never remove an existing Telegram webhook."""
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         config = settings.profile(profile)
         if config.kind != "bot":
             raise TeleloomError("capability_unavailable", "Polling is a bot-profile option.")
@@ -398,7 +409,7 @@ def management(
 ) -> None:
     """Grant/revoke explicit account management while the owner is stopped; does not grant send or read scope."""
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         config = settings.profile(profile)
         if config.kind != "user" and scope in {ManagementScope.contacts, ManagementScope.folders}:
             raise TeleloomError(
@@ -427,7 +438,7 @@ def file_root(
         raise TeleloomError("unsafe_file_path", "Use an absolute directory without traversal.")
     selected = plain_path(requested, directory=True) if enable else requested.absolute()
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         config = settings.profile(profile)
         roots = [root for root in config.file_roots if Path(root) != selected]
         config.file_roots = [*roots, str(selected)] if enable else roots
@@ -455,7 +466,7 @@ def transcription_config(
             "engine_unavailable", "Supply an absolute complete existing local model directory."
         )
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         config = settings.profile(profile)
         values = config.transcription.model_dump()
         for key, value in {
@@ -498,7 +509,7 @@ def limits(
         if value is not None
     }
     if changes:
-        with ownership(settings):
+        with governed(settings):
             settings.limits = Limits.model_validate({**settings.limits.model_dump(), **changes})
             settings.save()
     typer.echo(settings.limits.model_dump_json(indent=2))
@@ -551,6 +562,55 @@ def ui_command(open_browser: bool = typer.Option(True, "--open/--no-open")) -> N
     typer.echo(
         json.dumps({"url": result["url"], "expires_at": result["expires_at"], "opened": opened})
     )
+
+
+@app.command("control")
+@guarded
+def control_command(open_browser: bool = typer.Option(True, "--open/--no-open")) -> None:
+    """Owner-only exposure diff, Apply and verified restart, in this separate process."""
+    settings = Settings.load()
+    token = Secrets().require("", "mcp_token")
+
+    async def catalogue() -> list[dict[str, Any]]:
+        # Names come from the live owner's own panel projection, not from a second registry.
+        await ensure_daemon(settings, token)
+        async with owner_panel(settings, token) as http:
+            listed = await http.get("/ui/api/tools")
+        if listed.status_code != 200:
+            raise TeleloomError(
+                "catalogue_unavailable", "The owner did not report its tool catalogue."
+            )
+        return listed.json()["tools"]
+
+    control = Control(settings, asyncio.run(catalogue()))
+    issued = control.issue_bootstrap()
+
+    def ready() -> None:
+        # Printed and opened only once the reserved socket is serving, never before.
+        opened = False
+        if open_browser:
+            try:
+                opened = bool(webbrowser.open(issued["url"]))
+            except (webbrowser.Error, OSError):
+                opened = False
+            if not opened:
+                typer.echo("Browser could not open; use the printed url.", err=True)
+        typer.echo(
+            json.dumps(
+                {
+                    "url": issued["url"],
+                    "expires_at": issued["expires_at"],
+                    "port": issued["port"],
+                    "opened": opened,
+                }
+            )
+        )
+
+    control.on_ready = ready
+    try:
+        control.serve()
+    finally:
+        control.close()
 
 
 @app.command("stop")
@@ -684,49 +744,11 @@ def install_skills(
     """Copy all six skills to a chosen client or directory; --force permits replacement."""
     if target is None and client is None:
         raise TeleloomError("target_required", "Choose --client or --target.")
-    homes = {
-        Client.codex: ".agents/skills",
-        Client.claude: ".claude/skills",
-        Client.opencode: ".config/opencode/skills",
-        Client.opencode_v1: ".config/opencode/skills",
-        Client.pi: ".pi/agent/skills",
-    }
-    if target is not None:
-        destination = target
-    elif client == Client.hermes:
-        destination = hermes_config_path().parent / "skills"
-    else:
-        destination = Path.home() / homes[client or Client.codex]
-    destination = destination.expanduser().resolve()
-    bundled = Path(__file__).parent / "bundled_skills"
-    source = bundled if bundled.exists() else Path(__file__).resolve().parents[2] / "skills"
-    skills = sorted(
-        folder for folder in source.glob("teleloom-*") if (folder / "SKILL.md").is_file()
+    hermes_path = hermes_config_path() if client == Client.hermes and target is None else None
+    destination = control_clients.skill_destination(
+        client.value if client else None, target, hermes_path
     )
-    if len(skills) != 6:
-        raise TeleloomError(
-            "package_incomplete", "Six bundled skills were not found; reinstall the package."
-        )
-    conflicts = [folder.name for folder in skills if (destination / folder.name).exists()]
-    if conflicts and not force:
-        raise TeleloomError(
-            "skills_exist",
-            "Existing skills were preserved. Use --force to replace supplied files.",
-            details={"skills": conflicts},
-        )
-    destination.mkdir(parents=True, exist_ok=True)
-    for folder in skills:
-        output = destination / folder.name
-        if output.resolve().parent != destination:
-            raise TeleloomError(
-                "invalid_target", "Skill directory resolves outside the selected destination."
-            )
-        shutil.copytree(folder, output, dirs_exist_ok=force)
-    typer.echo(
-        json.dumps(
-            {"installed": [folder.name for folder in skills], "destination": str(destination)}
-        )
-    )
+    typer.echo(json.dumps(control_clients.install_bundled(destination, force=force)))
 
 
 def client_cli(client: Client, args: list[str]) -> str:
@@ -814,7 +836,7 @@ def client_entries(client: Client) -> list[Any]:
         ) from exc
 
 
-def install_client(client: Client, entry: dict[str, Any]) -> None:
+def install_client(client: Client, entry: dict[str, Any]) -> dict[str, str]:
     if client not in {Client.opencode, Client.hermes}:
         raise TeleloomError(
             "client_install_unsupported",
@@ -879,13 +901,7 @@ def install_client(client: Client, entry: dict[str, Any]) -> None:
     if existing:
         status = "already_configured"
     else:
-        assignment = "TELELOOM_DATA_DIR=" + env["TELELOOM_DATA_DIR"]
-        native_args = ["mcp", "add", "teleloom"]
-        if client == Client.opencode:
-            native_args += ["--global", "--env", assignment, "--", command, *args]
-        else:
-            native_args += ["--command", command, "--env", assignment, "--args", *args]
-        client_cli(client, native_args)
+        client_cli(client, control_clients.native_add_args(client.value, entry))
         installed = client_entries(client)
         if not installed or any(not matches(saved) for saved in installed):
             raise TeleloomError(
@@ -893,7 +909,7 @@ def install_client(client: Client, entry: dict[str, Any]) -> None:
                 f"{client.value} did not save the requested active teleloom entry; check its configuration before retrying.",
             )
         status = "installed"
-    typer.echo(json.dumps({"client": client.value, "status": status}))
+    return {"client": client.value, "status": status}
 
 
 @config_app.command("client")
@@ -901,44 +917,11 @@ def install_client(client: Client, entry: dict[str, Any]) -> None:
 def client_config(client: Client = Client.codex, install: bool = False) -> None:
     """Print a mergeable fragment; --install registers OpenCode 2 or Hermes using their CLI."""
     settings = Settings.load()
-    command = sys.executable
-    if sys.platform == "win32":
-        windowless = Path(command).with_name("pythonw.exe")
-        if windowless.is_file():
-            command = str(windowless)
-    args = ["-m", "teleloom", "mcp"]
-    env = {"TELELOOM_DATA_DIR": str(settings.data_dir)}
-    entry = {"command": command, "args": args, "env": env}
+    entry = control_clients.connection_entry(settings)
     if install:
-        install_client(client, entry)
+        typer.echo(json.dumps(install_client(client, entry)))
         return
-    if client == Client.codex:
-        typer.echo(
-            "[mcp_servers.teleloom]\ncommand = "
-            + json.dumps(command)
-            + "\nargs = "
-            + json.dumps(args)
-            + "\n[mcp_servers.teleloom.env]\nTELELOOM_DATA_DIR = "
-            + json.dumps(str(settings.data_dir))
-        )
-    elif client in {Client.opencode, Client.opencode_v1}:
-        local: dict[str, Any] = {
-            "type": "local",
-            "command": [command, *args],
-            "environment": env,
-        }
-        if client == Client.opencode_v1:
-            local["enabled"] = True
-        servers = {"teleloom": local}
-        typer.echo(
-            json.dumps(
-                {"mcp": {"servers": servers} if client == Client.opencode else servers},
-                indent=2,
-            )
-        )
-    else:
-        key = "mcpServers" if client in {Client.claude, Client.pi} else "mcp_servers"
-        typer.echo(json.dumps({key: {"teleloom": entry}}, indent=2))
+    typer.echo(control_clients.export_fragment(client.value, entry))
 
 
 @cache_app.command("prune")
@@ -947,7 +930,7 @@ def prune(before: datetime = typer.Option(...)) -> None:
     """Delete old indexed messages and Jev caches; delivery audit and exports are retained."""
     cutoff = iso(before)
     settings = Settings.load()
-    with ownership(settings):
+    with governed(settings):
         store = Store(settings.data_dir)
         try:
             with store.db:

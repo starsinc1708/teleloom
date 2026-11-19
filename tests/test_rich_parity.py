@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,7 @@ from tests.test_attachments_v02 import complete
 from tests.test_transport import client, running
 
 NOW = datetime(2026, 10, 5, tzinfo=UTC)
+SYNC_WINDOW = {"since": NOW.isoformat(), "until": (NOW + timedelta(days=1)).isoformat()}
 
 
 @pytest.mark.asyncio
@@ -187,7 +188,11 @@ async def test_selected_policy_withholds_cross_chat_metadata_preserving_original
     profile = Profile(kind="user", read_mode="selected", read_chats=[CHAT], sync_chats=[CHAT])
     settings = Settings(data_dir=tmp_path, profiles={"personal": profile})
     async with running(settings, factory(sdk)) as app, client(app, settings) as mcp:
-        sync = data(await mcp.call_tool("sync_start", {"profile_id": "personal", "chat_id": CHAT}))
+        sync = data(
+            await mcp.call_tool(
+                "sync_start", {"profile_id": "personal", "chat_id": CHAT, **SYNC_WINDOW}
+            )
+        )
         state = await complete(mcp, "personal", sync["data"]["job_id"])
         assert state["status"] == "completed", state
         for source in ["live", "index"]:
@@ -248,9 +253,11 @@ async def test_export_policy_is_bound_across_restart_without_deleting_originals(
     profile = Profile(kind="user", sync_chats=[CHAT])
     settings = Settings(data_dir=tmp_path, profiles={"personal": profile})
     async with running(settings, factory(sdk)) as app, client(app, settings) as mcp:
-        sync = data(await mcp.call_tool("sync_start", {"profile_id": "personal", "chat_id": CHAT}))[
-            "data"
-        ]
+        sync = data(
+            await mcp.call_tool(
+                "sync_start", {"profile_id": "personal", "chat_id": CHAT, **SYNC_WINDOW}
+            )
+        )["data"]
         assert (await complete(mcp, "personal", sync["job_id"]))["status"] == "completed"
         exported = data(
             await mcp.call_tool("export_start", {"profile_id": "personal", "chat_id": CHAT})

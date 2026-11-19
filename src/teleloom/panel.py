@@ -16,8 +16,19 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from . import panel_jobs, panel_reading
 from .config import Settings
 from .models import iso, utcnow
+from .panel_profiles import (
+    probe as run_probe,
+)
+from .panel_profiles import (
+    probe_html,
+    profiles_data,
+    profiles_html,
+    tool_catalogue,
+    tools_html,
+)
 from .runtime import Runtime
 from .status import status_snapshot
 
@@ -55,10 +66,22 @@ class Panel:
         self.cookie = f"teleloom_ui_{settings.port}"
         self.bootstraps: dict[str, float] = {}
         self.sessions: dict[str, _Session] = {}
+        # Exposure changes need an owner restart, so one catalogue is enough.
+        self._catalogue: dict[str, Any] | None = None
         self.app = Starlette(
             routes=[
                 Route("/ui", self.page),
                 Route("/ui/", self.page),
+                Route("/ui/profiles", self.profiles_page),
+                Route("/ui/tools", self.tools_page),
+                Route("/ui/probe", self.probe, methods=["POST"]),
+                Route("/ui/api/profiles", self.api_profiles),
+                Route("/ui/api/tools", self.api_tools),
+                Route("/ui/jobs", self.jobs_page),
+                Route("/ui/jobs/{job_id}", self.job_page),
+                Route("/ui/read", self.read_page, methods=["GET"]),
+                Route("/ui/read", self.read_start, methods=["POST"]),
+                Route("/ui/read/{job_id}", self.read_job_page),
                 Route("/ui/open", self.open_page),
                 Route("/ui/session", self.session, methods=["POST"]),
                 Route("/ui/logout", self.logout, methods=["POST"]),
@@ -105,12 +128,12 @@ class Panel:
         return key, session
 
     @staticmethod
-    def _headers(script_nonce: str | None = None) -> dict[str, str]:
+    def _headers(script_nonce: str | None = None, *, bootstrap: bool = False) -> dict[str, str]:
         script = f"script-src 'nonce-{script_nonce}'; " if script_nonce else ""
         return {
             "Cache-Control": "no-store",
             # no-referrer makes Chromium send a null Origin on native form POSTs.
-            "Referrer-Policy": "no-referrer" if script_nonce else "same-origin",
+            "Referrer-Policy": "no-referrer" if bootstrap else "same-origin",
             "Content-Security-Policy": "default-src 'none'; "
             + script
             + "style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "
@@ -124,10 +147,7 @@ class Panel:
             return JSONResponse({"error": "forbidden_origin"}, status_code=403)
         found = self._session(request)
         if found is None:
-            response = HTMLResponse(_signed_out_html(), status_code=401, headers=self._headers())
-            if self.cookie in request.cookies:
-                response.delete_cookie(self.cookie, path="/ui")
-            return response
+            return self._locked(request)
         _, session = found
         snapshot = status_snapshot(self.settings, self.runtime)
         return HTMLResponse(
@@ -135,13 +155,142 @@ class Panel:
             headers=self._headers(),
         )
 
+    def _locked(self, request: Request) -> Response:
+        response = HTMLResponse(_signed_out_html(), status_code=401, headers=self._headers())
+        if self.cookie in request.cookies:
+            response.delete_cookie(self.cookie, path="/ui")
+        return response
+
+    def _guard(self, request: Request) -> Response | None:
+        if not self._allowed(request, mutation=False):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        if self._session(request) is None:
+            return self._locked(request)
+        return None
+
+    async def jobs_page(self, request: Request) -> Response:
+        if (denied := self._guard(request)) is not None:
+            return denied
+        return panel_jobs.render(self, request, None)
+
+    async def job_page(self, request: Request) -> Response:
+        if (denied := self._guard(request)) is not None:
+            return denied
+        return panel_jobs.render(self, request, request.path_params["job_id"])
+
+    async def read_page(self, request: Request) -> Response:
+        if (denied := self._guard(request)) is not None:
+            return denied
+        return await panel_reading.render_preview(self, request)
+
+    async def read_start(self, request: Request) -> Response:
+        if not self._allowed(request, mutation=True):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        if self._session(request) is None:
+            return self._locked(request)
+        return await panel_reading.start(self, request)
+
+    async def read_job_page(self, request: Request) -> Response:
+        if (denied := self._guard(request)) is not None:
+            return denied
+        return await panel_reading.render(self, request, request.path_params["job_id"])
+
+    async def profiles_page(self, request: Request) -> Response:
+        if not self._allowed(request, mutation=False):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        found = self._session(request)
+        if found is None:
+            return self._locked(request)
+        nonce = secrets.token_urlsafe(16)
+        data = profiles_data(self.settings, self.runtime)
+        return HTMLResponse(
+            profiles_html(data, found[1].csrf, nonce=nonce), headers=self._headers(nonce)
+        )
+
+    async def tools_page(self, request: Request) -> Response:
+        if not self._allowed(request, mutation=False):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        found = self._session(request)
+        if found is None:
+            return self._locked(request)
+        data = await self.catalogue()
+        rows = profiles_data(self.settings, self.runtime)["profiles"]
+        selected = request.query_params.get("profile", "")
+        profile = next((row for row in rows if row["id"] == selected), None)
+        return HTMLResponse(
+            tools_html(
+                data,
+                query=request.query_params.get("q", "")[:200],
+                profile=profile,
+                profiles=[row["id"] for row in rows],
+                csrf=found[1].csrf,
+            ),
+            headers=self._headers(),
+        )
+
+    async def api_profiles(self, request: Request) -> Response:
+        if not self._allowed(request, mutation=False):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        if self._session(request) is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return JSONResponse(
+            profiles_data(self.settings, self.runtime), headers={"Cache-Control": "no-store"}
+        )
+
+    async def api_tools(self, request: Request) -> Response:
+        if not self._allowed(request, mutation=False):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        if self._session(request) is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        data = await self.catalogue()
+        needle = request.query_params.get("q", "").casefold().strip()
+        tools = [
+            tool
+            for tool in data["tools"]
+            if not needle or needle in (tool["name"] + " " + tool["summary"]).casefold()
+        ]
+        return JSONResponse({**data, "tools": tools}, headers={"Cache-Control": "no-store"})
+
+    async def catalogue(self) -> dict[str, Any]:
+        if self._catalogue is None:
+            self._catalogue = await tool_catalogue(self.settings, self.runtime)
+        return self._catalogue
+
+    async def probe(self, request: Request) -> Response:
+        if not self._allowed(request, mutation=True):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+        found = self._session(request)
+        if found is None:
+            return self._locked(request)
+        length = request.headers.get("content-length", "0")
+        if not length.isdigit() or int(length) > 4096:
+            return JSONResponse({"error": "request_too_large"}, status_code=413)
+        body = await request.body()
+        if len(body) > 4096:
+            return JSONResponse({"error": "request_too_large"}, status_code=413)
+        form = await request.form()
+        if not hmac.compare_digest(str(form.get("csrf", "")).encode(), found[1].csrf.encode()):
+            return JSONResponse({"error": "invalid_csrf"}, status_code=403)
+        try:
+            timeout_seconds = float(str(form.get("timeout_seconds") or 3))
+        except ValueError:
+            timeout_seconds = 0.0
+        result = await run_probe(
+            self.runtime,
+            str(form.get("profile_id") or "") or None,
+            str(form.get("chat_id") or "") or None,
+            timeout_seconds,
+        )
+        data = profiles_data(self.settings, self.runtime)
+        return HTMLResponse(probe_html(result, data, found[1].csrf), headers=self._headers())
+
     async def open_page(self, request: Request) -> Response:
         if not self._allowed(request, mutation=False):
             return JSONResponse({"error": "forbidden_origin"}, status_code=403)
         nonce = secrets.token_urlsafe(16)
         return HTMLResponse(
             BOOTSTRAP_HTML.replace("__NONCE__", nonce),
-            headers=self._headers(nonce),
+            headers=self._headers(nonce, bootstrap=True),
         )
 
     async def bootstrap(self, request: Request) -> Response:
@@ -272,7 +421,11 @@ dt{{font-weight:600}}dd{{margin:0;overflow-wrap:anywhere}}section{{margin-top:2e
 form{{margin-top:2.5em}}button{{font:inherit;padding:10px 16px;border-radius:6px;border:1px solid #b8b4a8;background:white;cursor:pointer}}
 a:focus-visible,button:focus-visible{{outline:3px solid #24231f;outline-offset:3px}}
 .small{{font-size:14px}}footer{{margin-top:3em;border-top:1px solid #d8d3c7;padding-top:1em}}
-</style></head><body><main><p class="small">teleloom / owner panel</p><h1>Workspace status</h1>
+</style></head><body><main><p class="small">teleloom / owner panel</p>
+<nav class="small" aria-label="Panel sections"><a href="/ui/profiles">Profiles and capabilities</a>
+<a href="/ui/tools">Tool catalogue</a> · <a href="/ui/jobs">Jobs and receipts</a>
+ · <a href="/ui/read">Bounded reading</a>
+</nav><h1>Workspace status</h1>
 <p class="state" data-state="{_esc(snapshot["state"])}" role="status">{_esc(states[snapshot["state"]])}</p>
 <dl><dt>Owner ID</dt><dd><code>{_esc(snapshot["owner_id"])}</code></dd>
 <dt>Workspace</dt><dd><code>{_esc(snapshot["workspace_id"])}</code></dd>

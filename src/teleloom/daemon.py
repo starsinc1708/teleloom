@@ -39,17 +39,14 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
 from .adapters import make_adapter
-from .config import Settings, private_dir
+from .build_info import build_info
+from .config import Settings
+from .control import claim_owner, control_lock, live_transition, ownership
 from .models import TeleloomError
 from .panel import Panel
 from .runtime import AdapterFactory, Runtime, fingerprint
 from .secrets import Secrets
 from .server import create_server, output
-
-
-def ownership(settings: Settings) -> FileLock:
-    private_dir(settings.data_dir)
-    return FileLock(settings.data_dir / "owner.lock", timeout=0)
 
 
 def protocol_error(
@@ -166,6 +163,7 @@ def create_application(
                 "owner_id": runtime.owner_id,
                 "version": __version__,
                 "workspace_id": fingerprint(str(settings.data_dir.resolve())),
+                "build": build_info(),
             }
         )
 
@@ -198,7 +196,9 @@ def installed_interpreter() -> str:
 def serve(settings: Settings) -> None:
     token = Secrets().require("", "mcp_token")
     try:
-        with ownership(settings):
+        # A management handoff is the one legitimate start during a live transition.
+        owner = claim_owner(settings, handoff=os.environ.get("TELELOOM_CONTROL_HANDOFF"))
+        try:
             # Avoid third-party exception/request logs carrying sensitive inputs.
             logging.basicConfig(level=logging.CRITICAL)
             server: uvicorn.Server
@@ -215,6 +215,8 @@ def serve(settings: Settings) -> None:
                 )
             )
             server.run()
+        finally:
+            owner.release()
     except Timeout:
         raise TeleloomError(
             "owner_busy", "A daemon or authentication flow already owns this workspace."
@@ -254,9 +256,18 @@ async def health(settings: Settings, token: str, *, report_timeout: bool = False
         return False
 
 
-async def ensure_daemon(settings: Settings, token: str) -> None:
+async def ensure_daemon(settings: Settings, token: str, *, handoff: str | None = None) -> None:
+    def check_transition() -> None:
+        if handoff is None and (pending := live_transition(settings)) is not None:
+            raise TeleloomError(
+                "transition_in_progress",
+                f"Owner management is at phase '{pending['phase']}'; the owner is started by it.",
+            )
+
+    check_transition()
     if await health(settings, token):
         return
+    gate = control_lock(settings)
     lock = FileLock(settings.data_dir / "startup.lock", timeout=15)
     try:
         # Nonblocking polling avoids holding the event loop in FileLock.acquire.
@@ -272,6 +283,16 @@ async def ensure_daemon(settings: Settings, token: str) -> None:
                     ) from None
                 await asyncio.sleep(0.1)
         try:
+            # Only the serialized starter probes the management lock. Ordinary
+            # bridge callers must not contend with each other or the owner booting.
+            try:
+                with gate:
+                    check_transition()
+            except Timeout:
+                raise TeleloomError(
+                    "transition_in_progress",
+                    "Owner management is active; retry after it reports.",
+                ) from None
             if await health(settings, token):
                 return
             env = {
@@ -279,6 +300,8 @@ async def ensure_daemon(settings: Settings, token: str) -> None:
                 "TELELOOM_DATA_DIR": str(settings.data_dir),
                 "TELELOOM_MCP_TOKEN": token,
             }
+            if handoff:
+                env["TELELOOM_CONTROL_HANDOFF"] = handoff
             kwargs: dict[str, Any] = {
                 "env": env,
                 "stdin": subprocess.DEVNULL,
