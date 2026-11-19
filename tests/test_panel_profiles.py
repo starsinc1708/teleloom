@@ -450,9 +450,14 @@ async def test_chromium_profile_probe_does_not_replay_on_reload(tmp_path):
             )
             assert issued.ok
             await page.goto((await issued.json())["url"])
-            await page.wait_for_url("**/ui")
-            await page.goto(origin + "/ui/profiles")
-            assert await page.get_by_text("Not opened yet", exact=False).count() == 2
+            await playwright.expect(
+                page.get_by_role("heading", name="Workspace status")
+            ).to_be_visible()
+            profile_page = await page.goto(origin + "/ui/profiles")
+            assert profile_page is not None and profile_page.ok
+            await playwright.expect(page.get_by_text("Not opened yet", exact=False)).to_have_count(
+                2
+            )
             assert "<script>alert(1)</script>" in await page.locator("main").inner_text()
             await page.get_by_text("Backend capabilities", exact=True).first.press("Enter")
             await playwright.expect(
@@ -480,11 +485,17 @@ async def test_chromium_profile_probe_does_not_replay_on_reload(tmp_path):
             await page.get_by_label("Profile", exact=True).select_option("alice")
             await chat.fill("111")
             await page.get_by_label("Timeout").select_option("1")
+            await page.evaluate("""() => {
+                const status = document.querySelector('#probe-status');
+                new MutationObserver(() => {
+                    if (status.textContent === 'Running one bounded read…') {
+                        window.probeLoadingSeen = true;
+                    }
+                }).observe(status, {childList: true});
+            }""")
             await probe.press("Enter")
-            await playwright.expect(
-                page.get_by_text("Running one bounded read…", exact=True)
-            ).to_be_visible()
             await playwright.expect(page.get_by_text("timeout", exact=True)).to_be_visible()
+            assert await page.evaluate("window.probeLoadingSeen === true")
             assert len(adapters) == 1 and adapters[0].reads == ["111"]
             assert page.url == origin + "/ui/profiles"
             await page.reload()
