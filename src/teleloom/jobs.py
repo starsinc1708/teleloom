@@ -910,6 +910,30 @@ class Jobs:
             }
         return {"jobs": self.store.job_summaries(profile)}
 
+    def check_panel_exposure(self) -> None:
+        if (
+            self.settings.exposure_mode == "selected"
+            and "jobs_status" not in self.settings.exposed_tools
+        ):
+            raise TeleloomError(
+                "tool_not_exposed",
+                "Job inspection is disabled by the owner's tool exposure policy.",
+            )
+
+    def check_panel(self, profile: str, job: dict[str, Any]) -> None:
+        """Owner-panel disclosure: current exposure, read grants and account generation."""
+        self.settings.profile(profile)
+        self.check_panel_exposure()
+        self._check_read(job)
+        self._check_account(profile, job.get("account"))
+
+    def panel_job(self, profile: str, id_: str) -> dict[str, Any]:
+        self.settings.profile(profile)
+        self.check_panel_exposure()
+        job = self._owned(profile, id_)
+        self.check_panel(profile, job)
+        return job
+
     async def control(self, profile: str, id_: str, action: str) -> dict[str, Any]:
         job = self._owned(profile, id_)
         if action == "cancel" and job["kind"] == "export" and job["payload"].get("source"):

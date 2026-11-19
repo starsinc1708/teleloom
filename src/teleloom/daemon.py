@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -38,16 +39,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
 from .adapters import make_adapter
-from .config import Settings, private_dir
+from .config import Settings
+from .control import claim_owner, control_lock, live_transition, ownership
 from .models import TeleloomError
+from .panel import Panel
 from .runtime import AdapterFactory, Runtime, fingerprint
 from .secrets import Secrets
 from .server import create_server, output
-
-
-def ownership(settings: Settings) -> FileLock:
-    private_dir(settings.data_dir)
-    return FileLock(settings.data_dir / "owner.lock", timeout=0)
 
 
 def protocol_error(
@@ -85,12 +83,18 @@ def protocol_error(
 
 
 class LocalAuth:
-    def __init__(self, app: ASGIApp, token: str, port: int) -> None:
+    def __init__(self, app: ASGIApp, token: str, port: int, panel: Panel | None = None) -> None:
         self.app, self.token, self.host = app, token, f"127.0.0.1:{port}"
+        self.panel = panel
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        if self.panel is not None and (path == "/ui" or path.startswith("/ui/")):
+            # The panel enforces its own session, Host/Origin and CSRF policy.
+            await self.panel(scope, receive, send)
             return
         request = Request(scope, receive)
         if (
@@ -175,13 +179,24 @@ def create_application(
         ],
         lifespan=lifespan,
     )
-    return LocalAuth(app, token, settings.port)
+    return LocalAuth(app, token, settings.port, Panel(settings, runtime, token))
+
+
+def installed_interpreter() -> str:
+    """Use the interpreter that runs this installation, preferring windowless Windows Python."""
+    if sys.platform == "win32":
+        windowless = Path(sys.executable).with_name("pythonw.exe")
+        if windowless.is_file():
+            return str(windowless)
+    return sys.executable
 
 
 def serve(settings: Settings) -> None:
     token = Secrets().require("", "mcp_token")
     try:
-        with ownership(settings):
+        # A management handoff is the one legitimate start during a live transition.
+        owner = claim_owner(settings, handoff=os.environ.get("TELELOOM_CONTROL_HANDOFF"))
+        try:
             # Avoid third-party exception/request logs carrying sensitive inputs.
             logging.basicConfig(level=logging.CRITICAL)
             server: uvicorn.Server
@@ -198,6 +213,8 @@ def serve(settings: Settings) -> None:
                 )
             )
             server.run()
+        finally:
+            owner.release()
     except Timeout:
         raise TeleloomError(
             "owner_busy", "A daemon or authentication flow already owns this workspace."
@@ -237,7 +254,21 @@ async def health(settings: Settings, token: str, *, report_timeout: bool = False
         return False
 
 
-async def ensure_daemon(settings: Settings, token: str) -> None:
+async def ensure_daemon(settings: Settings, token: str, *, handoff: str | None = None) -> None:
+    gate = control_lock(settings)
+    try:
+        gate.acquire()
+        gate.release()
+    except Timeout:
+        raise TeleloomError(
+            "transition_in_progress",
+            "Owner management is active; the owner will be started by it. Retry after it reports.",
+        ) from None
+    if handoff is None and (pending := live_transition(settings)) is not None:
+        raise TeleloomError(
+            "transition_in_progress",
+            f"Owner management is at phase '{pending['phase']}'; the owner is started by it.",
+        )
     if await health(settings, token):
         return
     lock = FileLock(settings.data_dir / "startup.lock", timeout=15)
@@ -262,6 +293,8 @@ async def ensure_daemon(settings: Settings, token: str) -> None:
                 "TELELOOM_DATA_DIR": str(settings.data_dir),
                 "TELELOOM_MCP_TOKEN": token,
             }
+            if handoff:
+                env["TELELOOM_CONTROL_HANDOFF"] = handoff
             kwargs: dict[str, Any] = {
                 "env": env,
                 "stdin": subprocess.DEVNULL,
@@ -272,7 +305,9 @@ async def ensure_daemon(settings: Settings, token: str) -> None:
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             else:
                 kwargs["start_new_session"] = True
-            process = subprocess.Popen([sys.executable, "-m", "teleloom", "serve"], **kwargs)
+            process = subprocess.Popen(
+                [installed_interpreter(), "-m", "teleloom", "serve"], **kwargs
+            )
             for _ in range(150):
                 if await health(settings, token):
                     return

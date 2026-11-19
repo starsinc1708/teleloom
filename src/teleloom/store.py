@@ -293,6 +293,68 @@ class Store:
             )
         ]
 
+    def job_page(
+        self,
+        before: int | None,
+        limit: int,
+        *,
+        profile: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Bounded keyset page of durable jobs, newest first, for read-only views."""
+        clauses: list[str] = []
+        values: list[Any] = []
+        if before is not None:
+            clauses.append("rowid<?")
+            values.append(before)
+        for column, expected in (("profile_id", profile), ("kind", kind), ("status", status)):
+            if expected is not None:
+                clauses.append(f"json_extract(data,'$.{column}')=?")
+                values.append(expected)
+        values.append(limit)
+        where = " AND ".join(clauses) or "1=1"
+        return [
+            {"seq": row[0], **json.loads(row[1])}
+            for row in self.db.execute(
+                f"SELECT rowid,data FROM jobs WHERE {where} ORDER BY rowid DESC LIMIT ?", values
+            )
+        ]
+
+    def job_facets(self) -> dict[str, list[str]]:
+        """Bounded filter vocabulary actually present in stored jobs."""
+        facets: dict[str, list[str]] = {}
+        for name in ("kind", "status"):
+            facets[name] = [
+                row[0]
+                for row in self.db.execute(
+                    f"SELECT DISTINCT json_extract(data,'$.{name}') AS value FROM jobs "
+                    f"WHERE json_extract(data,'$.{name}') IS NOT NULL ORDER BY value LIMIT 50"
+                )
+            ]
+        return facets
+
+    def delivery_page(self, job: str, start: int, limit: int) -> list[tuple[int, dict[str, Any]]]:
+        """Bounded page of one job's receipts by their stable stored position."""
+        return [
+            (row[0], json.loads(row[1]))
+            for row in self.db.execute(
+                "SELECT position,data FROM deliveries WHERE job=? AND position>=? "
+                "ORDER BY position LIMIT ?",
+                (job, start, limit),
+            )
+        ]
+
+    def delivery_counts(self, job: str) -> dict[str, int]:
+        return {
+            str(row[0]): row[1]
+            for row in self.db.execute(
+                "SELECT json_extract(data,'$.status'),COUNT(*) FROM deliveries "
+                "WHERE job=? GROUP BY 1",
+                (job,),
+            )
+        }
+
     def expired_jobs(self, kind: str, at: str) -> list[dict[str, Any]]:
         """Only retained expiring jobs need their full record for cleanup."""
         return [

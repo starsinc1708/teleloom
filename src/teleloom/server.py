@@ -8,11 +8,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 
-from . import __version__
 from .account_operations import AccountOperation, AdministrationOperation
 from .adapters import make_adapter
 from .administration import AccountRead, AdministrationRead
-from .build_info import build_info
 from .config import Settings
 from .contacts import ContactOperation
 from .events import EventFilter
@@ -219,7 +217,7 @@ def create_server(
         profile_id: str,
         chat_id: str,
         message_id: str,
-        provider: Literal["local", "telegram", "openai", "groq"] = "local",
+        provider: Literal["local", "telegram", "openai", "groq"] | None = None,
         allow_external_upload: bool = False,
         max_calls: Annotated[int, Field(ge=0, le=1)] = 1,
         max_bytes: Annotated[int, Field(ge=1, le=25_000_000)] = 10_000_000,
@@ -227,7 +225,7 @@ def create_server(
         timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 30,
         retention_hours: Annotated[int, Field(ge=1, le=168)] = 24,
     ) -> ToolResult:
-        """Transcribe one selected message in a bounded durable job. External AUDIO upload needs owner opt-in and explicit call consent/budget. Cache is untrusted enrichment; no automatic paid retries."""
+        """Transcribe one selected message in a bounded durable job. Provider defaults to the profile's stored choice (local when unset); an explicit provider wins. External AUDIO upload needs owner opt-in and explicit call consent/budget. Cache is untrusted enrichment; no automatic paid retries."""
         return await call(
             lambda: runtime.transcription.start(
                 profile_id,
@@ -307,15 +305,11 @@ def create_server(
     ) -> ToolResult:
         """Inspect local owner/build and effective scope. Explicit profile_id + chat_id opts into one bounded user history read; no content, login, acknowledgment or delivery. Local/MCP status is not live Telegram health."""
         from .diagnostics import owner_scope, selected_probe
+        from .status import status_snapshot
 
-        info: dict[str, Any] = {
-            "version": __version__,
-            "build": build_info(),
-            "owner_id": runtime.owner_id,
-            "profiles": len(settings.profiles),
-            "health": {"local": "ok", "mcp": "ok", "telegram": "not_checked"},
-            "scope": owner_scope(settings, runtime),
-        }
+        info: dict[str, Any] = status_snapshot(settings, runtime)
+        info["health"]["mcp"] = "ok"
+        info["scope"] = owner_scope(settings, runtime)
         if profile_id is not None or chat_id is not None:
             info["probe"] = await selected_probe(runtime, profile_id, chat_id, timeout_seconds)
             info["health"]["telegram"] = (

@@ -20,6 +20,30 @@ if TYPE_CHECKING:
 
 Provider = Literal["telegram", "local", "openai", "groq"]
 EXTERNAL = {"openai", "groq"}
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+
+def external_endpoint(value: str | None) -> str:
+    """HTTPS or explicit loopback HTTP only, no credentials, query or fragment."""
+    if not value:
+        raise TeleloomError(
+            "engine_unavailable",
+            "Owner must configure the OpenAI-compatible transcription endpoint.",
+        )
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    ):
+        raise TeleloomError(
+            "invalid_endpoint", "Use HTTPS or an explicit loopback HTTP transcription endpoint."
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
+        raise TeleloomError(
+            "invalid_endpoint",
+            "Transcription endpoint cannot contain credentials, query or fragment.",
+        )
+    value = value.rstrip("/")
+    return value if value.endswith("/audio/transcriptions") else value + "/audio/transcriptions"
 
 
 def source_version(message: Message) -> str:
@@ -116,37 +140,9 @@ class TranscriptionManager:
             }
         if provider == "telegram":
             return {"provider": provider, "model": "telegram", "engine_version": "server-managed"}
-        endpoint = (
-            "https://api.groq.com/openai/v1/audio/transcriptions"
-            if provider == "groq"
-            else config.openai_endpoint
+        endpoint = external_endpoint(
+            GROQ_ENDPOINT if provider == "groq" else config.openai_endpoint
         )
-        if not endpoint:
-            raise TeleloomError(
-                "engine_unavailable",
-                "Owner must configure the OpenAI-compatible transcription endpoint.",
-            )
-        parsed = urlsplit(endpoint)
-        if parsed.scheme != "https" and not (
-            parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-        ):
-            raise TeleloomError(
-                "invalid_endpoint", "Use HTTPS or an explicit loopback HTTP transcription endpoint."
-            )
-        if (
-            parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or not parsed.hostname
-        ):
-            raise TeleloomError(
-                "invalid_endpoint",
-                "Transcription endpoint cannot contain credentials, query or fragment.",
-            )
-        endpoint = endpoint.rstrip("/")
-        if not endpoint.endswith("/audio/transcriptions"):
-            endpoint += "/audio/transcriptions"
         return {
             "provider": provider,
             "model": config.groq_model if provider == "groq" else config.openai_model,
@@ -186,6 +182,7 @@ class TranscriptionManager:
                 }
         return {
             "providers": providers,
+            "default_provider": profile.transcription.provider,
             "allowed_chat_ids": profile.transcription_chats,
             "external_allowed_chat_ids": profile.transcription_external_chats,
             "external_daily_calls": profile.transcription.external_daily_calls,
@@ -242,7 +239,7 @@ class TranscriptionManager:
         chat_id: str,
         message_id: str,
         *,
-        provider: Provider = "local",
+        provider: Provider | None = None,
         allow_external_upload: bool = False,
         max_calls: int = 1,
         max_bytes: int = 10_000_000,
@@ -254,6 +251,8 @@ class TranscriptionManager:
 
         number(chat_id)
         number(message_id, positive=True)
+        # Explicit override wins; an older config without a choice stays local, never external.
+        provider = provider or self.jobs.settings.profile(profile_id).transcription.provider
         if (
             provider not in {"local", "telegram", "openai", "groq"}
             or not 0 <= max_calls <= 1

@@ -77,6 +77,8 @@ class Runtime:
             self.store.bind_profile(name, profile.generation)
         self.credentials = Secrets()
         self.factory = adapter_factory
+        if adapter_factory is make_adapter:
+            self.factory = lambda *args: make_adapter(*args, settings=settings)
         self.owner_id = uuid.uuid4().hex
         self.adapters: dict[str, Adapter] = {}
         self.cleanups: dict[str, asyncio.Task[None]] = {}
@@ -237,6 +239,7 @@ class Runtime:
                         k: v for k, v in p.identity.items() if k in {"id", "username", "name"}
                     },
                     "connected": name in self.adapters,
+                    "proxy": {"name": p.proxy or "direct"},
                     "error": failure(self.profile_errors[name], "connect", p)["code"]
                     if name in self.profile_errors
                     else None,
