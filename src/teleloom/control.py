@@ -4,6 +4,7 @@ It is a separate local process launched by an explicit CLI command, never by the
 daemon or an MCP client, and it never holds the MCP bearer as a credential of its own.
 """
 
+import asyncio
 import hashlib
 import hmac
 import html
@@ -14,14 +15,15 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import uvicorn
 from filelock import FileLock, Timeout
 from starlette.applications import Starlette
@@ -317,6 +319,22 @@ def reserved(port: int = 0) -> socket.socket:
     return sock
 
 
+@asynccontextmanager
+async def owner_panel(settings: Settings, token: str) -> AsyncIterator[httpx.AsyncClient]:
+    base = settings.url.removesuffix("/mcp")
+    async with httpx.AsyncClient(base_url=base, timeout=10, trust_env=False) as http:
+        issued = await http.post("/ui/bootstrap", headers={"Authorization": "Bearer " + token})
+        if issued.status_code != 200:
+            raise TeleloomError("panel_unavailable", "The owner did not issue a panel session.")
+        fragment = urlsplit(issued.json()["url"]).fragment
+        logged = await http.post(
+            "/ui/session", json={"bootstrap": fragment}, headers={"Origin": base}
+        )
+        if logged.status_code != 204:
+            raise TeleloomError("panel_unavailable", "The owner rejected its panel session.")
+        yield http
+
+
 class Lifecycle:
     """The only part of control that touches the owner; bearer stays inside these calls."""
 
@@ -332,18 +350,28 @@ class Lifecycle:
         await ensure_daemon(settings, Secrets().require("", "mcp_token"), handoff=handoff)
 
     async def observed(self, settings: Settings) -> dict[str, Any]:
-        # Observed through the owner's own MCP surface: only it can list what it registers.
         from .daemon import session
+        from .secrets import Secrets
 
+        token = Secrets().require("", "mcp_token")
+        async with owner_panel(settings, token) as http:
+            health = await http.get("/health", headers={"Authorization": "Bearer " + token})
+            tools = await http.get("/ui/api/tools")
+            profiles = await http.get("/ui/api/profiles")
+        if any(response.status_code != 200 for response in (health, tools, profiles)):
+            raise TeleloomError("verify_failed", "The restarted owner did not report its status.")
         async with session(settings, auto_start=False) as client:
-            listed = [tool.name for tool in (await client.list_tools()).tools]
-            status = await client.call_tool("server_status", {})
-        if status.isError or not status.structuredContent:
-            raise TeleloomError("verify_failed", "The restarted owner did not answer its status.")
-        value = dict(status.structuredContent["data"])
-        value["tools"] = sorted(listed)
-        value["exposure"] = (value.get("scope") or {}).get("tool_exposure") or {}
-        return value
+            listed = sorted(tool.name for tool in (await client.list_tools()).tools)
+        catalogue = tools.json()
+        if listed != sorted(tool["name"] for tool in catalogue["tools"] if tool["exposed"]):
+            raise TeleloomError("verify_failed", "MCP discovery disagrees with the owner panel.")
+        scope = profiles.json()
+        return {
+            **health.json(),
+            "tools": listed,
+            "scope": scope,
+            "exposure": {key: catalogue[key] for key in ("mode", "selected_tools")},
+        }
 
 
 async def transition(
@@ -351,6 +379,8 @@ async def transition(
     settings: Settings,
     operation: dict[str, Any],
     body: Callable[[], Awaitable[None]],
+    *,
+    verify: Callable[[dict[str, Any]], list[str]] | None = None,
 ) -> tuple[dict[str, Any], TeleloomError | None]:
     """Stop, run `body` under owner.lock, then restart under a one-use handoff and verify it.
 
@@ -429,16 +459,14 @@ async def transition(
         observed = await lifecycle.observed(settings)
     except Exception as error:  # noqa: BLE001 - reported, never retried or rolled back
         return failed(_failure(error))
-    if (
-        observed.get("workspace_id") != workspace_id(settings)
-        or observed.get("service") != "teleloom"
-    ):
-        return failed(
-            TeleloomError(
-                "verify_failed",
-                "Another process answers in this workspace; the owner is unverified.",
-            )
-        )
+    try:
+        mismatches = identity_mismatches(observed, settings)
+        if verify is not None and failure is None and not mismatches:
+            mismatches = verify(observed)
+        if mismatches:
+            return failed(TeleloomError("verify_failed", "; ".join(mismatches) + "."))
+    except Exception as error:  # noqa: BLE001 - preserve a terminal record on verification failure
+        return failed(_failure(error))
     value.update(
         phase="failed" if failure else "verified",
         handoff=None,
@@ -479,6 +507,7 @@ class Control:
         self.names = {str(item["name"]) for item in self.catalogue if item.get("name")}
         self.lifecycle = lifecycle or Lifecycle()
         self.owner = owner
+        self.send_confirming = asyncio.Lock()
         self.socket = reserved(port or 0)
         self.port = self.socket.getsockname()[1]
         self.host = f"127.0.0.1:{self.port}"
@@ -499,6 +528,7 @@ class Control:
                 Route("/control/policy", self.policy),
                 Route("/control/policy/apply", self.policy_apply, methods=["POST"]),
                 Route("/control/proxies", self.proxies),
+                Route("/control/proxies/check", self.proxy_check, methods=["POST"]),
                 Route("/control/proxies/apply", self.proxies_apply, methods=["POST"]),
                 Route("/control/engines", self.engines),
                 Route("/control/engines/apply", self.engines_apply, methods=["POST"]),
@@ -611,8 +641,13 @@ class Control:
             return JSONResponse({"error": "forbidden_origin"}, status_code=403)
         if not request.headers.get("content-type", "").startswith("application/json"):
             return JSONResponse({"error": "invalid_request"}, status_code=415)
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 4096:
+                return JSONResponse({"error": "request_too_large"}, status_code=413)
         try:
-            value = json.loads(await request.body()).get("bootstrap")
+            value = json.loads(body).get("bootstrap")
         except (ValueError, AttributeError):
             return JSONResponse({"error": "invalid_request"}, status_code=400)
         if not isinstance(value, str) or not 0 < len(value) <= 256:
@@ -643,16 +678,16 @@ class Control:
         current = exposure(data)
         proposed = current
         reviewed = request.query_params.get("review") == "1"
+        message = None
         if reviewed:
             try:
-                proposed = {
-                    "mode": request.query_params.get("mode", ""),
-                    "tools": sorted(request.query_params.getlist("tools")),
-                }
-                validated(proposed["mode"], proposed["tools"], self.names)
-            except TeleloomError:
-                proposed = current
+                mode = request.query_params.get("mode", "")
+                tools = request.query_params.getlist("tools") if mode == "selected" else []
+                mode, names = validated(mode, tools, self.names)
+                proposed = {"mode": mode, "tools": names}
+            except TeleloomError as error:
                 reviewed = False
+                message = f"{error.code}: {error.message}"
         return HTMLResponse(
             _control_html(
                 settings=self.settings,
@@ -665,7 +700,7 @@ class Control:
                 blockers=blockers(self.settings),
                 owner_up=_owner_held(self.settings),
                 csrf=found[1].csrf,
-                message=None,
+                message=message,
             ),
             headers=self._headers(),
         )
@@ -731,6 +766,11 @@ class Control:
         from . import control_proxies
 
         return await control_proxies.page(self, request)
+
+    async def proxy_check(self, request: Request) -> Response:
+        from .control_proxies import check
+
+        return await check(self, request)
 
     async def proxies_apply(self, request: Request) -> Response:
         from . import control_proxies
@@ -879,12 +919,17 @@ class Control:
         try:
             await self.lifecycle.start(settings, token)
             observed = await self.lifecycle.observed(settings)
-        except TeleloomError as error:
+        except Exception as exception:  # noqa: BLE001 - report the committed configuration
+            failure = _failure(exception)
             return fail(
-                f"restart failed ({error.code}: {error.message}). The new configuration is durable; "
+                f"restart failed ({failure.code}: {failure.message}). The new configuration is durable; "
                 "run teleloom serve or teleloom control to recover. Nothing is replayed."
             )
-        if mismatches := change.verify(observed):
+        try:
+            mismatches = change.verify(observed)
+        except Exception as exception:  # noqa: BLE001 - write succeeded; preserve the result
+            mismatches = [_failure(exception).message]
+        if mismatches:
             return fail(
                 "verification failed: " + "; ".join(mismatches) + ". The configuration is "
                 "durable; run teleloom doctor --mode mcp and inspect the configured port."
@@ -905,7 +950,7 @@ class Control:
         return self._render(200, change.describe(observed), csrf)
 
     def _fail(self, value: dict[str, Any], message: str, csrf: str) -> Response:
-        value.update(phase="failed", reason=message)
+        value.update(phase="failed", reason=message, handoff=None)
         save_record(self.settings, value)
         return self._render(500, message, csrf)
 

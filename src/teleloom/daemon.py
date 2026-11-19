@@ -39,6 +39,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
 from .adapters import make_adapter
+from .build_info import build_info
 from .config import Settings
 from .control import claim_owner, control_lock, live_transition, ownership
 from .models import TeleloomError
@@ -162,6 +163,7 @@ def create_application(
                 "owner_id": runtime.owner_id,
                 "version": __version__,
                 "workspace_id": fingerprint(str(settings.data_dir.resolve())),
+                "build": build_info(),
             }
         )
 

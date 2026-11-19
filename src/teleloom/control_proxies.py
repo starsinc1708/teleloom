@@ -26,6 +26,7 @@ from .secrets import Secrets
 
 PROTOCOLS = ("socks5", "socks4", "http")
 CREDENTIALS = "proxy"
+DEFAULT_ROUTE = "profile default"
 
 
 def _profiles(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -107,12 +108,12 @@ def validated(
         choice = (form.get("choice") or [""])[0]
         if profile not in profiles:
             raise TeleloomError("profile_not_found", "Choose one configured profile by name.")
-        if choice != "direct" and choice not in proposed["proxies"]:
+        if choice != "" and choice not in proposed["proxies"] and choice != "direct":
             raise TeleloomError(
                 "proxy_unavailable",
                 f"Unknown named proxy '{choice[:64]}'; create it first. Nothing was written.",
             )
-        proposed["assignments"][profile] = None if choice == "direct" else choice
+        proposed["assignments"][profile] = choice if choice in proposed["proxies"] else None
     elif action != "migrate":
         raise TeleloomError("invalid_action", "Choose endpoint, assign or migrate.")
     for profile, choice in proposed["assignments"].items():
@@ -171,7 +172,7 @@ def diff(before: Mapping[str, Any], after: Mapping[str, Any], data: Mapping[str,
     for name in sorted(set(before["assignments"]) | set(after["assignments"])):
         old, new = before["assignments"].get(name), after["assignments"].get(name)
         if old != new:
-            lines.append(f"profiles.{name}.proxy: {old or 'direct'} -> {new or 'direct'}")
+            lines.append(f"profiles.{name}.proxy: {old or DEFAULT_ROUTE} -> {new or DEFAULT_ROUTE}")
     for name in sorted(set(before["credentials"]) | set(after["credentials"])):
         if before["credentials"].get(name) != after["credentials"].get(name):
             lines.append(
@@ -187,8 +188,6 @@ def write(
     copied: list[tuple[str, str, str]],
 ) -> None:
     secrets = Secrets()
-    for name, username, password in copied:
-        secrets.set(CREDENTIALS, name, json.dumps({"username": username, "password": password}))
     _, data = read_config(settings)
     if proposed["proxies"]:
         data["proxies"] = {name: dict(item) for name, item in sorted(proposed["proxies"].items())}
@@ -200,7 +199,20 @@ def write(
             profile.pop("proxy", None)
         else:
             profile["proxy"] = choice
-    write_config(settings, data)
+    previous = {name: secrets.get(CREDENTIALS, name) for name, _, _ in copied}
+    applied = []
+    try:
+        for name, username, password in copied:
+            secrets.set(CREDENTIALS, name, json.dumps({"username": username, "password": password}))
+            applied.append(name)
+        write_config(settings, data)
+    except BaseException:
+        for name in applied:
+            if (value := previous[name]) is None:
+                secrets.delete(CREDENTIALS, name)
+            else:
+                secrets.set(CREDENTIALS, name, value)
+        raise
 
 
 def mismatches(
@@ -214,13 +226,10 @@ def mismatches(
     rows = (observed.get("scope") or {}).get("profiles") or []
     for name, choice in proposed["assignments"].items():
         reported = next((item for item in rows if item.get("id") == name), None)
-        if reported is not None and (
-            (reported.get("proxy") or {}).get("name") != (choice or "direct")
+        if reported is None or (reported.get("proxy") or {}).get("name") != (
+            choice or DEFAULT_ROUTE
         ):
-            found.append(
-                f"profile {name} reports proxy {reported.get('proxy')} "
-                f"instead of {choice or 'direct'}"
-            )
+            found.append(f"profile {name} did not report the reviewed route")
     return found
 
 
@@ -231,7 +240,7 @@ def change(
 ) -> Change:
     def describe(observed: dict[str, Any]) -> str:
         routes = ", ".join(
-            f"{name}={choice or 'direct'}"
+            f"{name}={choice or DEFAULT_ROUTE}"
             for name, choice in sorted(proposed["assignments"].items())
         )
         return (
@@ -242,7 +251,8 @@ def change(
 
     return Change(
         proposed=proposed,
-        current=current,
+        current=lambda data: current(data, Secrets()),
+        rotate=bool(copied),
         write=lambda: write(settings, proposed, copied or []),
         verify=lambda observed: mismatches(observed, settings, proposed),
         describe=describe,
@@ -272,7 +282,7 @@ async def probe(settings: Settings, name: str, timeout_seconds: float = 5.0) -> 
     return {"proxy": name, "status": "reachable", "direct_fallback": False}
 
 
-async def page(instance: Any, request: Request) -> Response:
+async def page(instance: Any, request: Request, *, message: str | None = None) -> Response:
     if not instance._allowed(request, mutation=False):
         return JSONResponse({"error": "forbidden_origin"}, status_code=403)
     found = instance._session(request)
@@ -289,11 +299,7 @@ async def page(instance: Any, request: Request) -> Response:
     }
     after, changes = before, []
     subject = "***"
-    message = None
     status = 200
-    if request.query_params.get("check"):
-        result = await probe(instance.settings, request.query_params["check"])
-        message = f"Route check: {json.dumps(result, ensure_ascii=False)}"
     if reviewed:
         form = {
             key: request.query_params.getlist(key)
@@ -304,8 +310,6 @@ async def page(instance: Any, request: Request) -> Response:
             if action == "migrate":
                 after, _ = migrate(data, secrets)
             else:
-                # Credentials are submitted only with Apply, so a review URL can never
-                # carry them and this page never re-renders a submitted value.
                 after = validated(data, action=action, form=form, secrets=secrets)
             changes = diff(before, after, data)
         except TeleloomError as error:
@@ -329,6 +333,22 @@ async def page(instance: Any, request: Request) -> Response:
         status_code=status,
         headers=instance._headers(),
     )
+
+
+async def check(instance: Any, request: Request) -> Response:
+    if not instance._allowed(request, mutation=True):
+        return JSONResponse({"error": "forbidden_origin"}, status_code=403)
+    found = instance._session(request)
+    if found is None:
+        return instance._locked(request)
+    form = await instance._form(request)
+    if isinstance(form, Response):
+        return form
+    if not hmac.compare_digest((form.get("csrf") or [""])[0].encode(), found[1].csrf.encode()):
+        return JSONResponse({"error": "invalid_csrf"}, status_code=403)
+    settings = Settings.load(instance.settings.data_dir)
+    result = await probe(settings, (form.get("name") or [""])[0][:64])
+    return await page(instance, request, message=f"Route check: {result['status']}")
 
 
 async def apply(instance: Any, request: Request) -> Response:
@@ -355,6 +375,12 @@ async def apply(instance: Any, request: Request) -> Response:
         else:
             credential = None
             if username or password:
+                protocol = (form.get("protocol") or [""])[0]
+                if action != "endpoint" or not username or (protocol == "socks4" and password):
+                    raise TeleloomError(
+                        "invalid_proxy_credentials",
+                        "Set credentials on the endpoint. Use a username, and omit the password for SOCKS4.",
+                    )
                 credential = (
                     (form.get("name") or [""])[0],
                     username,
@@ -416,7 +442,10 @@ def _html(
             f"<td>{_esc(item['protocol'])}://{_esc(item['host'])}:{_esc(item['port'])}</td>"
             f"<td>{'stored' if before['credentials'].get(name) else 'absent'}</td>"
             f"<td>{_esc(', '.join(assigned) or '—')}</td>"
-            f'<td><a href="/control/proxies?check={_esc(name)}">Check route</a></td></tr>'
+            '<td><form method="post" action="/control/proxies/check">'
+            f'<input type="hidden" name="name" value="{_esc(name)}">'
+            f'<input type="hidden" name="csrf" value="{_esc(csrf)}">'
+            '<button type="submit">Check route</button></form></td></tr>'
         )
     endpoint_form = (
         '<form method="get" action="/control/proxies">'
@@ -428,8 +457,6 @@ def _html(
         + "</select></label> "
         '<label>Host <input name="host" required></label> '
         '<label>Port <input name="port" type="number" min="1" max="65535" required></label> '
-        '<label>Username <input name="username" autocomplete="off"></label> '
-        '<label>Password <input name="password" type="password" autocomplete="new-password"></label> '
         '<button type="submit">Review endpoint</button></form>'
     )
     profile_form = (
@@ -439,7 +466,7 @@ def _html(
         '<label>Profile <select name="profile">'
         + "".join(f"<option>{_esc(item)}</option>" for item in profiles)
         + '</select></label> <label>Route <select name="choice">'
-        '<option value="direct">direct</option>'
+        '<option value="">Use profile default</option>'
         + "".join(f"<option>{_esc(item)}</option>" for item in before["proxies"])
         + '</select></label> <button type="submit">Review assignment</button></form>'
     )
@@ -457,7 +484,7 @@ def _html(
             hidden = (
                 f'<input type="hidden" name="profile" value="{_esc(subject)}">'
                 f'<input type="hidden" name="choice" '
-                f'value="{_esc(after["assignments"][subject] or "direct")}">'
+                f'value="{_esc(after["assignments"][subject] or "")}">'
             )
     apply_form = (
         '<form method="post" action="/control/proxies/apply">'
@@ -473,7 +500,7 @@ def _html(
             else ""
         )
         + '<button type="submit"'
-        + ("" if changes else " disabled")
+        + ("" if changes or action == "endpoint" else " disabled")
         + ">Apply and restart the owner</button></form>"
         if reviewed
         else ""
@@ -487,6 +514,13 @@ def _html(
                 or "<li>No difference from the current catalogue.</li>"
             )
             + "</ul>"
+            + (
+                "<p>Profiles using this endpoint: "
+                + _esc(", ".join(affected(data, subject)) or "none")
+                + ". Enter credentials below to replace the stored pair.</p>"
+                if action == "endpoint"
+                else ""
+            )
             + apply_form
             + '<p class="small">Editing an endpoint changes every listed profile. Delete is not offered: '
             "an assigned endpoint must be replaced by an explicit assignment first.</p></section>"

@@ -83,6 +83,19 @@ class FakeLifecycle:
             "version": "0.5.0",
             "build": build_info(),
             "tools": ["messages_get"],
+            "scope": {
+                "profiles": [
+                    {
+                        "id": name,
+                        "capabilities": {
+                            "transcription_engines": {
+                                "default_provider": profile.transcription.provider
+                            }
+                        },
+                    }
+                    for name, profile in Settings.load(settings.data_dir).profiles.items()
+                ]
+            },
         }
 
 

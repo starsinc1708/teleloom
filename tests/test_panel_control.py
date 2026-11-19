@@ -360,6 +360,28 @@ async def test_failed_stop_start_and_write_report_honest_state(tmp_path):
         assert (json.loads(path.read_text())["exposure_mode"]) == "read-only"  # no rollback
 
 
+@pytest.mark.asyncio
+async def test_failed_atomic_write_keeps_config_and_reports_stopped_owner(tmp_path, monkeypatch):
+    path = config_file(tmp_path)
+    before = path.read_bytes()
+    lifecycle = FakeLifecycle()
+    instance = make_control(tmp_path, lifecycle)
+
+    def refused(*args):
+        raise PermissionError(13, "injected configuration write failure")
+
+    monkeypatch.setattr(control, "write_config", refused)
+    async with await open_page(tmp_path, instance) as client:
+        await login(client, instance)
+        csrf = csrf_of((await client.get("/control")).text)
+        response = await apply(client, csrf, digest(path), "read-only", [])
+        assert response.status_code == 500 and "write failed" in response.text
+        assert "Run teleloom serve" in response.text
+    assert path.read_bytes() == before
+    assert lifecycle.stopped == 1 and lifecycle.started == []
+    assert control.record(instance.settings)["phase"] == "failed"
+
+
 def test_issued_url_is_a_bound_listener_not_a_checked_free_port(tmp_path):
     config_file(tmp_path)
     instance = make_control(tmp_path)

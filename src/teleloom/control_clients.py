@@ -95,11 +95,25 @@ def _selected(names: list[str] | None) -> list[Path]:
     return [folder for folder in skills if folder.name in wanted]
 
 
+def _skill_output(destination: Path, folder: Path) -> Path:
+    output = destination / folder.name
+    if output.resolve() != output or (output.exists() and not output.is_dir()):
+        raise TeleloomError("invalid_target", "Choose a regular skill directory without redirects.")
+    for item in folder.rglob("*"):
+        if item.is_file():
+            target = output / item.relative_to(folder)
+            if target.resolve() != target or (target.exists() and not target.is_file()):
+                raise TeleloomError(
+                    "invalid_target", "A supplied skill file has a conflicting target."
+                )
+    return output
+
+
 def skill_plan(destination: Path, names: list[str] | None = None) -> list[dict[str, Any]]:
     """What a write would do per selected skill, without touching the destination."""
     plans = []
     for folder in _selected(names):
-        output = destination / folder.name
+        output = _skill_output(destination, folder)
         files = sorted(
             item.relative_to(folder).as_posix() for item in folder.rglob("*") if item.is_file()
         )
@@ -132,12 +146,13 @@ def install_bundled(
         )
     destination.mkdir(parents=True, exist_ok=True)
     for folder in skills:
-        output = destination / folder.name
-        if output.resolve().parent != destination:
+        output = _skill_output(destination, folder)
+        try:
+            shutil.copytree(folder, output, dirs_exist_ok=force)
+        except OSError:
             raise TeleloomError(
-                "invalid_target", "Skill directory resolves outside the selected destination."
-            )
-        shutil.copytree(folder, output, dirs_exist_ok=force)
+                "skills_write_failed", "Could not copy all selected skill files. Check permissions."
+            ) from None
     return {"installed": [folder.name for folder in skills], "destination": str(destination)}
 
 
@@ -271,18 +286,15 @@ def _existing(client: str, entry: dict[str, Any]) -> dict[str, Any]:
 def _skill_fingerprint(destination: Path, names: list[str] | None) -> str:
     digest = hashlib.sha256()
     for folder in _selected(names):
+        output = _skill_output(destination, folder)
         for item in sorted(folder.rglob("*")):
             if item.is_file():
-                digest.update(
-                    folder.name.encode() + b"/" + item.relative_to(folder).as_posix().encode()
-                )
+                relative = item.relative_to(folder)
+                digest.update(folder.name.encode() + b"/" + relative.as_posix().encode())
                 digest.update(item.read_bytes())
-        output = destination / folder.name
-        if output.is_dir():
-            for item in sorted(output.rglob("*")):
-                if item.is_file():
-                    digest.update(b"installed/" + item.relative_to(output).as_posix().encode())
-                    digest.update(item.read_bytes())
+                installed = output / relative
+                if installed.is_file():
+                    digest.update(b"installed/" + installed.read_bytes())
     return digest.hexdigest()
 
 

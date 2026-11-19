@@ -239,7 +239,7 @@ class Runtime:
                         k: v for k, v in p.identity.items() if k in {"id", "username", "name"}
                     },
                     "connected": name in self.adapters,
-                    "proxy": {"name": p.proxy or "direct"},
+                    "proxy": {"name": p.proxy or "profile default"},
                     "error": failure(self.profile_errors[name], "connect", p)["code"]
                     if name in self.profile_errors
                     else None,

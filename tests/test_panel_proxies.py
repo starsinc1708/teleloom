@@ -68,7 +68,7 @@ class FakeLifecycle:
                     {
                         "id": name,
                         "grants": profile.grants(),
-                        "proxy": {"name": profile.proxy or "direct"},
+                        "proxy": {"name": profile.proxy or "profile default"},
                     }
                     for name, profile in fresh.profiles.items()
                 ],
@@ -125,6 +125,8 @@ async def test_create_assign_two_profiles_apply_and_no_plaintext(tmp_path, monke
         created = await review(http, [*ENDPOINT.items(), ("review", "1")])
         assert created.status_code == 200, created.text
         assert "proxies.corp: null -&gt; " in created.text
+        assert 'name="username"' not in created.text.split("</form>", 1)[0]
+        assert 'name="password"' not in created.text.split("</form>", 1)[0]
         applied = await apply(
             http, instance, digest(tmp_path), **ENDPOINT, username="corp-user", password=PASSWORD
         )
@@ -140,7 +142,7 @@ async def test_create_assign_two_profiles_apply_and_no_plaintext(tmp_path, monke
                 [("action", "assign"), ("profile", profile), ("choice", "corp"), ("review", "1")],
             )
             assert assigned.status_code == 200, assigned.text
-            assert f"profiles.{profile}.proxy: direct -&gt; corp" in assigned.text
+            assert f"profiles.{profile}.proxy: profile default -&gt; corp" in assigned.text
             applied = await apply(
                 http,
                 instance,
@@ -151,6 +153,21 @@ async def test_create_assign_two_profiles_apply_and_no_plaintext(tmp_path, monke
             )
             assert applied.status_code == 200, applied.text
             assert "Applied and verified" in applied.text
+
+        async def failed_connect(host, port):
+            assert (host, port) == ("127.0.0.1", 8080)
+            raise OSError
+
+        monkeypatch.setattr(control_proxies.asyncio, "open_connection", failed_connect)
+        fields = {"name": "corp", "csrf": session_csrf(instance)}
+        refused = await http.post(
+            "/control/proxies/check", data=fields, headers={"Origin": "https://outside.invalid"}
+        )
+        assert refused.status_code == 403
+        checked = await http.post(
+            "/control/proxies/check", data=fields, headers={"Origin": instance.origin}
+        )
+        assert checked.status_code == 200 and "Route check: unavailable" in checked.text
 
     raw = (tmp_path / "config.json").read_text(encoding="utf-8")
     data = json.loads(raw)
@@ -184,7 +201,7 @@ async def test_migration_preserves_legacy_route_and_secret(tmp_path, monkeypatch
     async with login(instance) as http:
         migrated = await review(http, [("action", "migrate"), ("review", "1")])
         assert migrated.status_code == 200, migrated.text
-        assert "profiles.personal.proxy: direct -&gt; legacy_personal" in migrated.text
+        assert "profiles.personal.proxy: profile default -&gt; legacy_personal" in migrated.text
         applied = await apply(http, instance, digest(tmp_path), action="migrate")
         assert applied.status_code == 200, applied.text
         assert "Applied and verified" in applied.text

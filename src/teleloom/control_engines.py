@@ -277,12 +277,24 @@ def change(
     keys: list[tuple[str, str, str]],
     credentials: Any,
 ) -> Change:
+    def verify(observed: dict[str, Any]) -> list[str]:
+        found = identity_mismatches(observed, settings)
+        _, data = read_config(settings)
+        if current(data, name) != proposed:
+            found.append("the stored engine configuration differs from the review")
+        profiles = (observed.get("scope") or {}).get("profiles") or []
+        profile: dict[str, Any] = next((item for item in profiles if item.get("id") == name), {})
+        engines = (profile.get("capabilities") or {}).get("transcription_engines") or {}
+        if engines.get("default_provider") != proposed["transcription"]["provider"]:
+            found.append("the owner did not report the reviewed transcription provider")
+        return found
+
     return Change(
         proposed=proposed,
         current=lambda data: current(data, name),
         write=lambda: write(settings, name, proposed, keys, credentials),
         rotate=bool(keys),
-        verify=lambda observed: identity_mismatches(observed, settings),
+        verify=verify,
         describe=lambda observed: (
             f"Applied and verified: engine settings for profile {name} are durable and owner "
             f"{observed.get('owner_id')} answers in this workspace with build "
@@ -507,16 +519,21 @@ def _html(
         )
     )
     form = (
-        '<select name="profile" aria-label="Profile">' + options + "</select>" if profiles else ""
+        '<form method="get" action="/control/engines">'
+        '<label>Profile <select name="profile">' + options + "</select></label>"
+        ' <button type="submit">Load profile</button></form>'
+        if profiles
+        else ""
     )
     chooser = (
-        f'<form method="get" action="/control/engines">{form}'
+        form + '<form method="get" action="/control/engines">'
+        f'<input type="hidden" name="profile" value="{_esc(name)}">'
         '<fieldset><legend>Existing engines</legend><p class="small">Only the supported inputs '
         "above are edited. AI, transcription and external-upload grants are separate and this "
         "page never changes them.</p>" + fields + '<input type="hidden" name="review" value="1">'
         '<p><button type="submit">Review exact diff</button></p></fieldset></form>'
         if name
-        else f'<form method="get" action="/control/engines">{form}</form>'
+        else form
     )
     applied = "".join(
         f'<input type="hidden" name="{key}" value="{_esc(after["transcription"][key] or "")}">'

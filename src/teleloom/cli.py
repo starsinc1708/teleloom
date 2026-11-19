@@ -25,7 +25,7 @@ from . import __version__, control_clients
 from .adapters import proxy_url, user_client
 from .auth import code_login, identity, qr_login
 from .config import Limits, Profile, Settings, validate_name
-from .control import Control, governed, write_exposure
+from .control import Control, governed, owner_panel, write_exposure
 from .daemon import bridge, ensure_daemon, session, stop_daemon
 from .daemon import serve as run_daemon
 from .digest import digest_validate_command
@@ -574,21 +574,7 @@ def control_command(open_browser: bool = typer.Option(True, "--open/--no-open"))
     async def catalogue() -> list[dict[str, Any]]:
         # Names come from the live owner's own panel projection, not from a second registry.
         await ensure_daemon(settings, token)
-        base = settings.url.removesuffix("/mcp")
-        async with httpx.AsyncClient(base_url=base, timeout=10, trust_env=False) as http:
-            issued = await http.post("/ui/bootstrap", headers={"Authorization": "Bearer " + token})
-            if issued.status_code != 200:
-                raise TeleloomError(
-                    "catalogue_unavailable", "The owner did not issue a panel session."
-                )
-            fragment = str(issued.json()["url"]).split("#", 1)[1]
-            logged = await http.post(
-                "/ui/session", json={"bootstrap": fragment}, headers={"Origin": base}
-            )
-            if logged.status_code != 204:
-                raise TeleloomError(
-                    "catalogue_unavailable", "The owner rejected the panel session."
-                )
+        async with owner_panel(settings, token) as http:
             listed = await http.get("/ui/api/tools")
         if listed.status_code != 200:
             raise TeleloomError(
