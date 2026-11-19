@@ -146,7 +146,7 @@ def _unavailable(panel: Any) -> Response:
         "is not running, so this view cannot confirm current policy. Start it with "
         "<code>teleloom ui</code> and try again.</p>"
     )
-    return HTMLResponse(_layout(panel, "Reading", body), status_code=503, headers=panel._headers())
+    return HTMLResponse(_layout("Reading", body), status_code=503, headers=panel._headers())
 
 
 def _form_html(panel: Any, values: dict[str, str]) -> str:
@@ -225,7 +225,7 @@ async def render_preview(panel: Any, request: Request) -> Response:
             body += _failure(exc)
         else:
             body += _preview(params) + _start_form(panel._session(request)[1].csrf, params)
-    return HTMLResponse(_layout(panel, "Reading preview", body), headers=panel._headers())
+    return HTMLResponse(_layout("Reading preview", body), headers=panel._headers())
 
 
 async def start(panel: Any, request: Request) -> Response:
@@ -272,7 +272,7 @@ async def start(panel: Any, request: Request) -> Response:
         status, _ = _HTTP.get(exc.code, (400, ""))
         body = _form_html(panel, values) + _failure(exc)
         return HTMLResponse(
-            _layout(panel, "Reading preview", body), status_code=status, headers=panel._headers()
+            _layout("Reading preview", body), status_code=status, headers=panel._headers()
         )
     location = (
         "/ui/read/"
@@ -496,9 +496,9 @@ async def render(panel: Any, request: Request, job_id: str) -> Response:
             '<p><a href="/ui/read">Preview a reading job</a></p>'
         )
         return HTMLResponse(
-            _layout(panel, "Frozen evidence", body), status_code=status, headers=panel._headers()
+            _layout("Frozen evidence", body), status_code=status, headers=panel._headers()
         )
     return protected_page(
-        _layout(panel, "Frozen evidence", _evidence(job, page), notice=_notice(panel, {profile})),
+        _layout("Frozen evidence", _evidence(job, page), notice=_notice(panel, {profile})),
         panel._headers,
     )
