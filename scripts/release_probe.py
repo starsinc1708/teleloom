@@ -67,10 +67,12 @@ def snapshot(directory):
         settings.data_dir = Path(isolated)
         runtime = Runtime(settings)
         try:
-            capabilities = {
-                profile["id"]: {"kind": profile["kind"], "capabilities": profile["capabilities"]}
-                for profile in runtime.profiles()["profiles"]
-            }
+            capabilities = {}
+            for profile in runtime.profiles()["profiles"]:
+                values = profile["capabilities"]
+                # Older owners used local transcription by default without reporting the field.
+                values["transcription_engines"].setdefault("default_provider", "local")
+                capabilities[profile["id"]] = {"kind": profile["kind"], "capabilities": values}
             result["capabilities"] = fingerprint(capabilities)
         finally:
             runtime.store.close()
