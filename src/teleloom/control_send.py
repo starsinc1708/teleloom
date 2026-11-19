@@ -21,8 +21,9 @@ from urllib.parse import quote
 
 from mcp.shared.exceptions import McpError
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
+from .browser_cache import protected_page
 from .config import Settings
 from .control_policy import chat_id as exact_chat
 from .models import TeleloomError, utcnow
@@ -205,9 +206,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 
 
 def _page(instance: Any, title: str, body: str, status: int = 200) -> Response:
-    return HTMLResponse(
-        _layout(instance, title, body), status_code=status, headers=instance._headers()
-    )
+    return protected_page(_layout(instance, title, body), instance._headers, status=status)
 
 
 def _refused(instance: Any, exc: TeleloomError) -> Response:

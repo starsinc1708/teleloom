@@ -166,6 +166,9 @@ async def test_preview_start_pages_and_refresh_use_one_frozen_job(tmp_path):
             first = await browser.get(location)
             assert first.status_code == 200
             assert "no-store" in first.headers["cache-control"]
+            nonce = re.search(r"'nonce-([^']+)'", first.headers["content-security-policy"]).group(1)
+            assert f'<script nonce="{nonce}">' in first.text
+            assert "replaceChildren()" in first.text and "location.reload()" in first.text
             assert "Completed" in first.text
             assert first.text.count('<td style="white-space:pre-wrap">') == 10
             assert "Decision 23" in first.text

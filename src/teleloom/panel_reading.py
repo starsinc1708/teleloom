@@ -16,6 +16,7 @@ from urllib.parse import quote
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from .browser_cache import protected_page
 from .models import TeleloomError, iso
 from .panel_jobs import _HTTP, _layout, _notice
 from .rich_reads import scoped_evidence
@@ -497,7 +498,7 @@ async def render(panel: Any, request: Request, job_id: str) -> Response:
         return HTMLResponse(
             _layout(panel, "Frozen evidence", body), status_code=status, headers=panel._headers()
         )
-    return HTMLResponse(
+    return protected_page(
         _layout(panel, "Frozen evidence", _evidence(job, page), notice=_notice(panel, {profile})),
-        headers=panel._headers(),
+        panel._headers,
     )
