@@ -1,7 +1,7 @@
 """Owner-only named proxy catalogue and explicit profile assignment.
 
 Config holds protocol/host/port and the assignment name; the username/password
-stay in the existing Secrets boundary under the shared 'proxy' namespace. Apply
+stay in a separate named-endpoint namespace inside Secrets. Apply
 reuses control's stop/write/restart/verification transition. A profile with no
 assignment keeps its legacy per-profile secret; an assignment that is missing or
 invalid refuses a direct connection instead of silently going around the proxy.
@@ -20,13 +20,12 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from .adapters import named_proxy_credentials
-from .config import ProxyEndpoint, Settings, validate_proxy_name
+from .config import ProxyEndpoint, Settings, proxy_uri_host, validate_proxy_name
 from .control import Change, identity_mismatches, read_config, revision, write_config
 from .models import TeleloomError
-from .secrets import Secrets
+from .secrets import NAMED_PROXY, Secrets
 
 PROTOCOLS = ("socks5", "socks4", "http")
-CREDENTIALS = "proxy"
 DEFAULT_ROUTE = "profile default"
 
 
@@ -42,16 +41,20 @@ def current(data: Mapping[str, Any], secrets: Secrets | None = None) -> dict[str
             "protocol": item.get("protocol"),
             "host": item.get("host"),
             "port": item.get("port"),
+            **({"legacy_credentials": False} if item.get("legacy_credentials") is False else {}),
         }
         for name, item in sorted((data.get("proxies") or {}).items())
         if isinstance(item, dict)
     }
-    credentials = {}
-    for name in proxies:
+    credentials: dict[str, bool | None] = {}
+    for name, item in proxies.items():
         try:
-            credentials[name] = bool(secrets.get(CREDENTIALS, name)) if secrets else False
+            credentials[name] = bool(
+                secrets
+                and secrets.named_proxy(name, legacy=item.get("legacy_credentials") is not False)
+            )
         except TeleloomError:
-            credentials[name] = False
+            credentials[name] = None
     return {
         "proxies": proxies,
         "assignments": {
@@ -73,10 +76,10 @@ def _endpoint(protocol: Any, host: str, port: str) -> dict[str, Any]:
     except (ValidationError, ValueError):
         raise TeleloomError(
             "invalid_proxy",
-            "Proxy needs socks5, socks4 or http with a bare host and a port from 1 to 65535; "
+            "Proxy needs socks5, socks4 or http with a bare hostname or IP address and a port from 1 to 65535; "
             "nothing was written.",
         ) from None
-    return value.model_dump()
+    return value.model_dump(exclude={"legacy_credentials"})
 
 
 def validated(
@@ -96,11 +99,19 @@ def validated(
             name = validate_proxy_name(raw_name)
         except ValueError as error:
             raise TeleloomError("invalid_proxy_name", str(error)) from None
-        proposed["proxies"][name] = _endpoint(
+        previous = proposed["proxies"].get(name)
+        endpoint = _endpoint(
             (form.get("protocol") or [""])[0],
             (form.get("host") or [""])[0],
             (form.get("port") or [""])[0],
         )
+        if (
+            previous is None
+            or credential is not None
+            or previous.get("legacy_credentials") is False
+        ):
+            endpoint["legacy_credentials"] = False
+        proposed["proxies"][name] = endpoint
         proposed["credentials"].setdefault(name, False)
         if credential is not None:
             proposed["credentials"][name] = True
@@ -152,15 +163,20 @@ def migrate(
                 "invalid_proxy",
                 f"Legacy proxy for profile {profile} is invalid; nothing was migrated or written.",
             ) from None
-        if name in proposed["proxies"] or secrets.get(CREDENTIALS, name) is not None:
+        if name in proposed["proxies"] or secrets.named_proxy(name, legacy=True) is not None:
             raise TeleloomError(
                 "proxy_exists", f"The name {name} is already in use. Rename it before migration."
             )
+        endpoint["legacy_credentials"] = False
         proposed["proxies"][name] = endpoint
         proposed["assignments"][profile] = name
         proposed["credentials"][name] = True
         copied.append((name, unquote(parsed.username or ""), unquote(parsed.password or "")))
     return proposed, copied
+
+
+def _credential_status(value: bool | None) -> str:
+    return "needs repair" if value is None else "stored" if value else "absent"
 
 
 def diff(before: Mapping[str, Any], after: Mapping[str, Any], data: Mapping[str, Any]) -> list[str]:
@@ -181,8 +197,7 @@ def diff(before: Mapping[str, Any], after: Mapping[str, Any], data: Mapping[str,
     for name in sorted(set(before["credentials"]) | set(after["credentials"])):
         if before["credentials"].get(name) != after["credentials"].get(name):
             lines.append(
-                f"proxies.{name}.credentials: "
-                f"{'stored' if after['credentials'].get(name) else 'absent'}"
+                f"proxies.{name}.credentials: {_credential_status(after['credentials'].get(name))}"
             )
     return lines
 
@@ -204,19 +219,19 @@ def write(
             profile.pop("proxy", None)
         else:
             profile["proxy"] = choice
-    previous = {name: secrets.get(CREDENTIALS, name) for name, _, _ in copied}
+    previous = {name: secrets.get_keyring(NAMED_PROXY, name) for name, _, _ in copied}
     applied = []
     try:
         for name, username, password in copied:
-            secrets.set(CREDENTIALS, name, json.dumps({"username": username, "password": password}))
+            secrets.set(NAMED_PROXY, name, json.dumps({"username": username, "password": password}))
             applied.append(name)
         write_config(settings, data)
     except BaseException:
         for name in applied:
             if (value := previous[name]) is None:
-                secrets.delete(CREDENTIALS, name)
+                secrets.delete(NAMED_PROXY, name)
             else:
-                secrets.set(CREDENTIALS, name, value)
+                secrets.set(NAMED_PROXY, name, value)
         raise
 
 
@@ -395,9 +410,13 @@ async def apply(instance: Any, request: Request) -> Response:
             proposed = validated(
                 data, action=action, form=form, secrets=secrets, credential=credential
             )
-            if action == "endpoint" and credential is None:
-                protocol = proposed["proxies"][subject]["protocol"]
-                named_proxy_credentials(secrets.get(CREDENTIALS, subject) or "", protocol)
+            checked = subject if action == "endpoint" else proposed["assignments"].get(subject)
+            if checked and credential is None:
+                endpoint = proposed["proxies"][checked]
+                value = secrets.named_proxy(
+                    checked, legacy=endpoint.get("legacy_credentials") is not False
+                )
+                named_proxy_credentials(value or "", endpoint["protocol"])
     except TeleloomError as error:
         return HTMLResponse(
             _html(
@@ -447,8 +466,8 @@ def _html(
         assigned = affected(data, name)
         rows += (
             f"<tr><td><strong>{_esc(name)}</strong></td>"
-            f"<td>{_esc(item['protocol'])}://{_esc(item['host'])}:{_esc(item['port'])}</td>"
-            f"<td>{'stored' if before['credentials'].get(name) else 'absent'}</td>"
+            f"<td>{_esc(item['protocol'])}://{_esc(proxy_uri_host(str(item['host'])))}:{_esc(item['port'])}</td>"
+            f"<td>{_credential_status(before['credentials'].get(name))}</td>"
             f"<td>{_esc(', '.join(assigned) or '—')}</td>"
             '<td><form method="post" action="/control/proxies/check">'
             f'<input type="hidden" name="name" value="{_esc(name)}">'

@@ -350,6 +350,73 @@ async def test_unsupported_endpoint_model_and_absent_model_refuse_before_stop(
     assert credentials.written == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://[::1",
+        "https://[v1.test]/v1",
+        "https://provider.invalid:70000/v1",
+        "https://provider.invalid:bad/v1",
+        "https://provider.invalid:0/v1",
+        "https://provider.invalid:/v1",
+        "https://private-user:private-password@provider.invalid/v1",
+        "https://@provider.invalid/v1",
+        "https://provider.invalid/v1?private-query",
+        "https://provider.invalid/v1?",
+        "https://provider.invalid/v1#",
+    ],
+)
+async def test_invalid_transcription_endpoint_is_rejected_by_review_and_apply(
+    tmp_path, monkeypatch, endpoint
+):
+    path = config_file(tmp_path)
+    original = path.read_bytes()
+    credentials = FakeCredentials()
+    fake_engines(monkeypatch, credentials)
+    lifecycle = FakeLifecycle()
+    instance = make_control(tmp_path, lifecycle)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=instance, raise_app_exceptions=False),
+            base_url=instance.origin,
+        ) as client:
+            await login(client, instance)
+            csrf = await review_csrf(client)
+            fields = {
+                "profile": "personal",
+                "jev_model": "jev-latest",
+                "openai_endpoint": endpoint,
+                "openai_model": "whisper-1",
+                "groq_model": "whisper-large-v3-turbo",
+            }
+            preview = await client.get("/control/engines", params={**fields, "review": "1"})
+            apply = await post_apply(client, {**fields, "csrf": csrf, "revision": digest(path)})
+            for response in (preview, apply):
+                assert response.status_code == 422 and "invalid_endpoint" in response.text
+                assert endpoint not in response.text
+                assert (
+                    "private-password" not in response.text and "private-query" not in response.text
+                )
+    finally:
+        instance.close()
+    assert lifecycle.stopped == 0 and path.read_bytes() == original
+    assert credentials.written == []
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("https://provider.invalid/v1/", "https://provider.invalid/v1/audio/transcriptions"),
+        ("http://localhost:8080/v1", "http://localhost:8080/v1/audio/transcriptions"),
+        ("http://[::1]:8080/v1", "http://[::1]:8080/v1/audio/transcriptions"),
+        ("https://[::1]/v1/audio/transcriptions", "https://[::1]/v1/audio/transcriptions"),
+    ],
+)
+def test_supported_transcription_endpoint_forms(endpoint, expected):
+    assert transcription.external_endpoint(endpoint) == expected
+
+
 def test_credential_write_rolls_back_when_config_write_refuses(tmp_path, monkeypatch):
     path = config_file(tmp_path)
     original = path.read_bytes()

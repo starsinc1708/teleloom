@@ -61,28 +61,47 @@ chat or shell history.
 
 <!-- test:ssh-bootstrap -->
 ```bash
-umask 077
-ssh vps-owner 'cd /srv/teleloom && TELELOOM_DATA_DIR=/srv/teleloom/data \
-  exec .venv/bin/teleloom ui --no-open' > ~/.cache/teleloom-ui.json
-python3 -c 'import json,sys,webbrowser; webbrowser.open(json.load(open(sys.argv[1]))["url"])' \
-  ~/.cache/teleloom-ui.json
-rm -f ~/.cache/teleloom-ui.json
+(
+  umask 077
+  bootstrap=$(mktemp "${TMPDIR:-/tmp}/teleloom-ui.XXXXXXXX") || exit
+  trap 'rm -f -- "$bootstrap"' 0
+  trap 'exit 1' HUP INT TERM
+  ssh vps-owner 'cd /srv/teleloom && TELELOOM_DATA_DIR=/srv/teleloom/data \
+    exec .venv/bin/teleloom ui --no-open' > "$bootstrap" || exit $?
+  python3 -c 'import json,sys,webbrowser; sys.exit(not webbrowser.open(json.load(open(sys.argv[1]))["url"]))' \
+    "$bootstrap"
+)
 ```
 
 The browser exchanges the fragment for an HttpOnly `Path=/ui` session cookie and
 clears the fragment before the next navigation. The URL never contains the MCP
-bearer token. A missing `ENOENT` for the data directory, an authentication
-prompt or a banner on stdout means the remote command did not reach the owner;
-fix that instead of reusing a partial URL.
+bearer token. The snippet opens the browser only after SSH exits successfully
+and removes the private temporary file when it exits. If SSH fails or its
+stdout contains a banner instead of clean JSON, fix the underlying issue before
+requesting a new bootstrap.
 
 ## 4. Verify that this is the remote owner
 
 The status page must show the remote `Owner ID`, `Workspace`, `Version`,
 `Build ID`, `Source commit`, profile count and snapshot time. Compare the
 workspace fingerprint with the remote `teleloom doctor --mode mcp` output and
-the build with the installed wheel. A local owner would show this machine's
-workspace and build; if it does, the tunnel or the command targeted the wrong
-host.
+the build with the installed wheel. MCP doctor can report the live owner only
+when the owner exposes `server_status`. If it is hidden, compare the
+authenticated panel's Workspace and Build ID with the expected values from the
+same installed interpreter and data directory on the VPS:
+
+```bash
+ssh vps-owner 'cd /srv/teleloom && TELELOOM_DATA_DIR=/srv/teleloom/data .venv/bin/python -c "
+from teleloom.build_info import build_info
+from teleloom.config import Settings
+from teleloom.runtime import fingerprint
+print(fingerprint(str(Settings.load().data_dir.resolve())))
+print(build_info()[\"build_id\"])
+"'
+```
+
+This comparison leaves tool exposure unchanged. A mismatch means the tunnel or
+bootstrap targeted a different workspace or installation.
 
 Open and refresh the page, then sign out. Refreshing returns the same owner
 snapshot and starts no Telegram or AI work. Sign-out revokes only that browser

@@ -30,14 +30,27 @@ def external_endpoint(value: str | None) -> str:
             "engine_unavailable",
             "Owner must configure the OpenAI-compatible transcription endpoint.",
         )
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        hostname, port = parsed.hostname, parsed.port
+        httpx.URL(value)
+    except (ValueError, httpx.InvalidURL):
+        raise TeleloomError("invalid_endpoint", "Malformed transcription endpoint.") from None
+    if (
+        not hostname
+        or port == 0
+        or parsed.netloc.endswith(":")
+        or any(char.isspace() or char == "\\" for char in parsed.netloc)
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise TeleloomError("invalid_endpoint", "Malformed transcription endpoint.")
     if parsed.scheme != "https" and not (
-        parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        parsed.scheme == "http" and hostname in {"127.0.0.1", "localhost", "::1"}
     ):
         raise TeleloomError(
             "invalid_endpoint", "Use HTTPS or an explicit loopback HTTP transcription endpoint."
         )
-    if parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname:
+    if parsed.username is not None or "?" in value or "#" in value:
         raise TeleloomError(
             "invalid_endpoint",
             "Transcription endpoint cannot contain credentials, query or fragment.",

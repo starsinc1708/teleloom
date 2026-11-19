@@ -107,7 +107,9 @@ def csrf_of(body: str) -> str:
 
 
 async def apply(client, csrf: str, revision: str, mode: str, tools: list[str]):
-    data = {"csrf": csrf, "revision": revision, "mode": mode, "tools": tools}
+    page = await client.get("/control", params={"review": "1", "mode": mode, "tools": tools})
+    reviewed = page.text.split('name="reviewed" value="', 1)[1].split('"', 1)[0]
+    data = {"csrf": csrf, "revision": revision, "mode": mode, "tools": tools, "reviewed": reviewed}
     return await client.post(
         "/control/apply", data=data, headers={"Origin": str(client.base_url).rstrip("/")}
     )
@@ -211,17 +213,59 @@ async def test_review_diff_apply_preserves_foreign_fields_and_verifies_restart(t
 
 
 @pytest.mark.asyncio
-async def test_stale_revision_active_job_and_unknown_delivery_refuse_before_stop(tmp_path):
+async def test_exposure_apply_requires_the_exact_review_in_the_same_session(tmp_path):
+    path = config_file(tmp_path)
+    lifecycle = FakeLifecycle()
+    instance = make_control(tmp_path, lifecycle)
+    async with (
+        await open_page(tmp_path, instance) as client,
+        await open_page(tmp_path, instance) as other,
+    ):
+        await login(client, instance)
+        await login(other, instance)
+        review = await client.get(
+            "/control", params={"review": "1", "mode": "selected", "tools": "messages_get"}
+        )
+        fields = {"csrf": csrf_of(review.text), "revision": digest(path)}
+        headers = {"Origin": instance.origin}
+        missing = await client.post(
+            "/control/apply", headers=headers, data={**fields, "mode": "read-only"}
+        )
+        assert missing.status_code == 409 and "Review the exact diff" in missing.text
+        token = review.text.split('name="reviewed" value="', 1)[1].split('"', 1)[0]
+        proposal = {**fields, "reviewed": token, "mode": "selected", "tools": ["messages_get"]}
+        for altered in ({"tools": ["send_message"]}, {"mode": "read-only", "tools": []}):
+            response = await client.post(
+                "/control/apply", headers=headers, data={**proposal, **altered}
+            )
+            assert response.status_code == 409 and "Review the exact diff" in response.text
+        other_csrf = csrf_of((await other.get("/control")).text)
+        rejected = await other.post(
+            "/control/apply", headers=headers, data={**proposal, "csrf": other_csrf}
+        )
+        assert rejected.status_code == 409
+        assert lifecycle.stopped == 0 and json.loads(path.read_text()) == BASE
+        tab = await client.get("/control", params={"review": "1", "mode": "read-only"})
+        tab_token = tab.text.split('name="reviewed" value="', 1)[1].split('"', 1)[0]
+        accepted = await client.post("/control/apply", headers=headers, data=proposal)
+        assert accepted.status_code == 200
+        stale = await client.post(
+            "/control/apply",
+            headers=headers,
+            data={**fields, "reviewed": tab_token, "mode": "read-only"},
+        )
+        assert stale.status_code == 409 and "stale" in stale.text
+        assert lifecycle.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_active_job_and_unknown_delivery_refuse_before_stop(tmp_path):
     path = config_file(tmp_path)
     lifecycle = FakeLifecycle()
     instance = make_control(tmp_path, lifecycle)
     async with await open_page(tmp_path, instance) as client:
         await login(client, instance)
         csrf = csrf_of((await client.get("/control")).text)
-
-        stale = await apply(client, csrf, "0" * 64, "read-only", [])
-        assert stale.status_code == 409 and "stale" in stale.text
-        assert lifecycle.stopped == 0 and json.loads(path.read_text()) == BASE
 
         store = Store(tmp_path)
         try:

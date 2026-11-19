@@ -6,8 +6,11 @@ as the documented OpenSSH command requires.
 """
 
 import asyncio
+import os
 import re
+import shutil
 import socket
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,8 +18,10 @@ import httpx
 import pytest
 import uvicorn
 
+from teleloom.build_info import build_info
 from teleloom.config import Settings
 from teleloom.daemon import create_application
+from teleloom.runtime import fingerprint
 
 TOKEN = "ssh-tunnel-test-token"
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "gui-ssh.md"
@@ -113,14 +118,54 @@ def test_documented_ssh_flow_is_loopback_equal_port_and_carries_no_secret_in_arg
     bootstrap = documented("<!-- test:ssh-bootstrap -->")
     assert "ssh " in bootstrap and "ui --no-open" in bootstrap
     assert "TELELOOM_DATA_DIR=/srv/teleloom/data" in bootstrap and ".venv/bin/teleloom" in bootstrap
-    assert "umask 077" in bootstrap and "> ~/.cache/teleloom-ui.json" in bootstrap
+    assert "umask 077" in bootstrap
     assert "ui/open#" not in bootstrap, "the bootstrap URL must not be an ssh argument"
+
+
+@pytest.mark.parametrize(
+    ("ssh_result", "browser_result", "expected_browser"),
+    [(0, 0, True), (255, 0, False), (0, 7, True)],
+)
+def test_documented_bootstrap_cleans_temporary_url(
+    tmp_path, ssh_result, browser_result, expected_browser
+):
+    shell = os.environ.get("TELELOOM_TEST_BASH") or shutil.which("sh")
+    if shell is None:
+        pytest.skip("A POSIX shell is required to execute the SSH runbook")
+    (tmp_path / "home").mkdir()
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    fixture = f"""
+export HOME="$PWD/home" TMPDIR="$PWD/temp"
+ssh() {{
+  test "$#" = 2 && test "$1" = vps-owner || return 99
+  printf '%s' '{{"url":"http://127.0.0.1:8765/ui/open#fake-bootstrap"}}'
+  return {ssh_result}
+}}
+python3() {{
+  test "$1" = -c && test -f "$3" && grep -q fake-bootstrap "$3" || return 98
+  touch browser-called
+  return {browser_result}
+}}
+"""
+    result = subprocess.run(
+        [shell, "-s"],
+        cwd=tmp_path,
+        input=fixture + documented("<!-- test:ssh-bootstrap -->"),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == (ssh_result or browser_result)
+    assert (tmp_path / "browser-called").exists() is expected_browser
+    assert not list(temp.iterdir())
+    assert "fake-bootstrap" not in result.stdout + result.stderr
 
 
 @pytest.mark.asyncio
 async def test_forwarded_owner_keeps_exact_host_and_tunnel_loss_is_not_owner_failure(tmp_path):
     port = free_port()
-    settings = Settings(data_dir=tmp_path, port=port)
+    settings = Settings(data_dir=tmp_path, port=port, exposure_mode="selected")
     async with remote_owner(settings):
         target = ("127.0.0.2", port)
         async with forward(port, target) as tunnel:
@@ -142,6 +187,8 @@ async def test_forwarded_owner_keeps_exact_host_and_tunnel_loss_is_not_owner_fai
                 page = await browser.get("/ui")
                 assert page.status_code == 200
                 assert "Workspace status" in page.text and str(tmp_path) not in page.text
+                assert fingerprint(str(tmp_path.resolve())) in page.text
+                assert build_info()["build_id"] in page.text
 
                 replay = await browser.post(
                     "/ui/session", json={"bootstrap": fragment}, headers={"Origin": base}

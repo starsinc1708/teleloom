@@ -7,6 +7,22 @@ from keyring.errors import KeyringError
 
 from .models import TeleloomError
 
+# Profile names start with a letter; this keyring and env namespace cannot overlap.
+NAMED_PROXY = "_named_proxy"
+_PROFILE_CREDENTIALS = {
+    "api_id",
+    "api_hash",
+    "session",
+    "bot_token",
+    "proxy",
+    "openai_transcription_key",
+    "groq_transcription_key",
+}
+
+
+def _variable(profile: str, name: str) -> str:
+    return f"TELELOOM_{profile.upper()}_{name.upper()}" if profile else f"TELELOOM_{name.upper()}"
+
 
 class Secrets:
     """OS credentials, with explicit environment overrides; never plaintext files."""
@@ -31,30 +47,38 @@ class Secrets:
         )
 
     def get(self, profile: str, name: str) -> str | None:
-        variable = (
-            f"TELELOOM_{profile.upper()}_{name.upper()}" if profile else f"TELELOOM_{name.upper()}"
-        )
-        if value := os.getenv(variable):
-            return value
+        return os.getenv(_variable(profile, name)) or self.get_keyring(profile, name)
+
+    def get_keyring(self, profile: str, name: str) -> str | None:
+        """Read the saved value independently of an environment override."""
         try:
             backend = self.backend()
             return backend.get_password("teleloom", f"{profile}:{name}") if backend else None
         except KeyringError:
             raise TeleloomError(
-                "credentials_unavailable", f"Configure an OS keyring or set {variable}."
+                "credentials_unavailable",
+                f"Configure an OS keyring or set {_variable(profile, name)}.",
             ) from None
+
+    def named_proxy(self, name: str, *, legacy: bool) -> str | None:
+        value = self.get(NAMED_PROXY, name)
+        if value is not None or not legacy:
+            return value
+        value = self.get("proxy", name)
+        if value is not None and name in _PROFILE_CREDENTIALS:
+            raise TeleloomError(
+                "proxy_credentials_ambiguous",
+                "Re-enter the named proxy credentials in the proxy catalogue. "
+                "The old slot overlaps a profile credential; no alternate route was selected.",
+            )
+        return value
 
     def require(self, profile: str, name: str) -> str:
         value = self.get(profile, name)
         if not value:
-            variable = (
-                f"TELELOOM_{profile.upper()}_{name.upper()}"
-                if profile
-                else f"TELELOOM_{name.upper()}"
-            )
             raise TeleloomError(
                 "credentials_missing",
-                f"Missing credential. Set {variable} or run teleloom init/auth.",
+                f"Missing credential. Set {_variable(profile, name)} or run teleloom init/auth.",
             )
         return value
 

@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 import uuid
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
 from typing import Literal
 
@@ -88,10 +88,13 @@ class ProxyEndpoint(BaseModel):
     protocol: Literal["socks5", "socks4", "http"]
     host: str = Field(min_length=1, max_length=253)
     port: int = Field(ge=1, le=65535)
+    legacy_credentials: bool = True
 
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str) -> str:
+        if ":" in value and "%" not in value:
+            return str(IPv6Address(value))
         labels = value.split(".")
         if all(label.isascii() and label.isdigit() for label in labels):
             IPv4Address(value)
@@ -99,8 +102,12 @@ class ProxyEndpoint(BaseModel):
             not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
             for label in labels
         ):
-            raise ValueError("Proxy host must be a bare hostname or IPv4 address, without scheme.")
+            raise ValueError("Proxy host must be a bare hostname or IP address, without scheme.")
         return value
+
+
+def proxy_uri_host(host: str) -> str:
+    return f"[{host}]" if ":" in host else host
 
 
 class Profile(BaseModel):
