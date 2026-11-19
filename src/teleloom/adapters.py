@@ -20,7 +20,7 @@ from telethon import TelegramClient, errors, events, functions, types, utils
 from telethon.sessions import StringSession
 
 from . import __version__
-from .config import Profile, Settings
+from .config import Profile, Settings, proxy_uri_host
 from .models import Chat, Message, TeleloomError, utcnow
 from .secrets import Secrets
 from .store import Store
@@ -154,8 +154,7 @@ def proxy_url(
 ) -> str | None:
     """Resolve one profile's route; a named assignment never falls back to direct.
 
-    The endpoint's username/password live in Secrets under the shared 'proxy'
-    namespace as JSON, so config, exports and results never contain them.
+    Endpoint credentials are kept in their own Secrets namespace.
     """
     if profile.proxy is None:
         return credentials.get(profile_id, "proxy")
@@ -165,10 +164,10 @@ def proxy_url(
             "proxy_unavailable",
             f"Named proxy '{profile.proxy}' is not configured; refusing a direct connection.",
         )
-    secret = credentials.get("proxy", profile.proxy) or ""
+    secret = credentials.named_proxy(profile.proxy, legacy=endpoint.legacy_credentials) or ""
     username, password = named_proxy_credentials(secret, endpoint.protocol)
     auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username else ""
-    return f"{endpoint.protocol}://{auth}{endpoint.host}:{endpoint.port}"
+    return f"{endpoint.protocol}://{auth}{proxy_uri_host(endpoint.host)}:{endpoint.port}"
 
 
 def user_client(

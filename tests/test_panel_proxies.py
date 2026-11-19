@@ -182,11 +182,16 @@ async def test_create_assign_two_profiles_apply_and_no_plaintext(tmp_path, monke
 
     raw = (tmp_path / "config.json").read_text(encoding="utf-8")
     data = json.loads(raw)
-    assert data["proxies"]["corp"] == {"protocol": "http", "host": "127.0.0.1", "port": 8080}
+    assert data["proxies"]["corp"] == {
+        "protocol": "http",
+        "host": "127.0.0.1",
+        "port": 8080,
+        "legacy_credentials": False,
+    }
     assert data["profiles"]["personal"]["proxy"] == "corp"
     assert data["profiles"]["work"]["proxy"] == "corp"
     assert PASSWORD not in raw and "corp-user" not in raw
-    assert json.loads(stored["teleloom:proxy:corp"]) == {
+    assert json.loads(stored["teleloom:_named_proxy:corp"]) == {
         "username": "corp-user",
         "password": PASSWORD,
     }
@@ -222,11 +227,12 @@ async def test_migration_preserves_legacy_route_and_secret(tmp_path, monkeypatch
         "protocol": "socks5",
         "host": "legacy.local",
         "port": 1080,
+        "legacy_credentials": False,
     }
     assert data["profiles"]["personal"]["proxy"] == "legacy_personal"
     assert "proxy" not in data["profiles"]["work"]
     assert stored["teleloom:personal:proxy"] == LEGACY
-    assert json.loads(stored["teleloom:proxy:legacy_personal"]) == {
+    assert json.loads(stored["teleloom:_named_proxy:legacy_personal"]) == {
         "username": "legacy-user",
         "password": "legacy-pass",
     }
@@ -345,3 +351,114 @@ def make_control_proxy(tmp_path) -> control.Control:
     )
     settings.save()
     return control.Control(settings, [], lifecycle=FakeLifecycle())
+
+
+@pytest.mark.asyncio
+async def test_legacy_collision_requires_reentry_without_overwriting_profile_secret(
+    tmp_path, monkeypatch
+):
+    stored = fake_keyring(monkeypatch)
+    token = "fake-telegram-token-from-profile-slot"
+    stored["teleloom:proxy:bot_token"] = token
+    # A non-colliding credential from the previous release remains usable.
+    stored["teleloom:proxy:corp"] = json.dumps({"username": "old-user", "password": "old-pass"})
+    settings = Settings.model_validate(
+        {
+            "data_dir": tmp_path,
+            "profiles": {
+                "proxy": {"kind": "bot"},
+                "work": {"kind": "user", "proxy": "bot_token"},
+                "personal": {"kind": "user", "proxy": "corp"},
+            },
+            "proxies": {
+                name: {"protocol": "http", "host": "127.0.0.1", "port": 8080}
+                for name in ("bot_token", "corp")
+            },
+        }
+    )
+    settings.save()
+    instance = control.Control(settings, [], lifecycle=FakeLifecycle())
+    assert adapters.proxy_url("personal", settings.profiles["personal"], Secrets(), settings) == (
+        "http://old-user:old-pass@127.0.0.1:8080"
+    )
+    with pytest.raises(TeleloomError, match="Re-enter") as failure:
+        adapters.proxy_url("work", settings.profiles["work"], Secrets(), settings)
+    assert token not in str(failure.value)
+    async with login(instance) as http:
+        inspected = await http.get("/control/proxies")
+        assert "needs repair" in inspected.text and token not in inspected.text
+        fields = {**ENDPOINT, "name": "bot_token"}
+        refused = await apply(http, instance, digest(tmp_path), **fields)
+        assert refused.status_code == 422 and token not in refused.text
+        assert "Re-enter" in refused.text and instance.lifecycle.stopped == 0
+        repaired = await apply(
+            http, instance, digest(tmp_path), **fields, username="new-user", password=PASSWORD
+        )
+        assert repaired.status_code == 200 and token not in repaired.text
+        assert PASSWORD not in repaired.text
+
+    assert stored["teleloom:proxy:bot_token"] == token
+    assert token not in (tmp_path / "config.json").read_text(encoding="utf-8")
+    fresh = Settings.load(tmp_path)
+    assert adapters.proxy_url("work", fresh.profiles["work"], Secrets(), fresh) == (
+        f"http://new-user:{PASSWORD}@127.0.0.1:8080"
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_unauthenticated_endpoint_does_not_read_colliding_profile_secret(
+    tmp_path, monkeypatch
+):
+    stored = fake_keyring(monkeypatch)
+    stored["teleloom:proxy:session"] = "fake-session"
+    instance = make_control_proxy(tmp_path)
+    async with login(instance) as http:
+        created = await apply(http, instance, digest(tmp_path), **{**ENDPOINT, "name": "session"})
+        assert created.status_code == 200
+        assigned = await apply(
+            http, instance, digest(tmp_path), action="assign", profile="personal", choice="session"
+        )
+        assert assigned.status_code == 200
+    fresh = Settings.load(tmp_path)
+    assert adapters.proxy_url("personal", fresh.profiles["personal"], Secrets(), fresh) == (
+        "http://127.0.0.1:8080"
+    )
+    assert stored == {"teleloom:proxy:session": "fake-session"}
+
+
+@pytest.mark.asyncio
+async def test_legacy_ipv6_migration_preserves_telethon_route(tmp_path, monkeypatch):
+    stored = fake_keyring(monkeypatch)
+    stored["teleloom:personal:proxy"] = "socks5://user:pass@[2001:db8::1]:1080"
+    stored["teleloom:personal:api_hash"] = "fake-api-hash"
+    instance = make_control_proxy(tmp_path)
+    expected = {
+        "proxy_type": "socks5",
+        "addr": "2001:db8::1",
+        "port": 1080,
+        "username": "user",
+        "password": "pass",
+        "rdns": True,
+    }
+
+    def capture(*args, **kwargs):
+        return kwargs["proxy"]
+
+    monkeypatch.setattr(adapters, "TelegramClient", capture)
+
+    def route(settings):
+        profile = settings.profiles["personal"]
+        profile.api_id = 1
+        return adapters.user_client("personal", profile, Secrets(), new=True, settings=settings)
+
+    assert route(instance.settings) == expected
+    async with login(instance) as http:
+        migrated = await review(http, [("action", "migrate"), ("review", "1")])
+        assert migrated.status_code == 200 and "legacy_personal" in migrated.text
+        applied = await apply(http, instance, digest(tmp_path), action="migrate")
+        assert applied.status_code == 200
+        catalogue = await http.get("/control/proxies")
+        assert "socks5://[2001:db8::1]:1080" in catalogue.text
+    fresh = Settings.load(tmp_path)
+    assert fresh.proxies["legacy_personal"].host == "2001:db8::1"
+    assert route(fresh) == expected

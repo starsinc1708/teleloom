@@ -9,17 +9,18 @@ failover, health scheduler, MTProxy or automatic routing is included.
 
 - `Settings.proxies: dict[str, ProxyEndpoint]` in `config.json`. An endpoint is
   `protocol` (`socks5`, `socks4` or `http` — exactly the schemes the Telethon and
-  Bot API adapters already accept), `host` (bare hostname or IPv4; a scheme or
-  path is rejected) and `port` (1–65535). Names match `[a-z][a-z0-9_-]{0,63}`.
+  Bot API adapters already accept), a bare hostname, IPv4 or IPv6 in `host`,
+  and `port` (1–65535). Names match `[a-z][a-z0-9_-]{0,63}`.
 - `Profile.proxy: str | None` is the assignment. Absent means "no assignment";
   the legacy per-profile secret `proxy` continues to be used verbatim, so every
   existing profile keeps its current route without migration.
 - Credentials never enter `config.json`. A named endpoint's username/password
   are one JSON value in the existing `Secrets` boundary under
-  `("proxy", name)`; `Secrets` keeps OS-keyring/env precedence. UI, MCP, export,
-  results, errors and logs see only protocol/host/port, the assignment name and
-  `stored`/`absent`. Apply takes credentials in the POST body only; review URLs
-  and review pages never carry or re-render them.
+  `("_named_proxy", name)`, with the environment override
+  `TELELOOM__NAMED_PROXY_<NAME>` (uppercase name). The leading underscore is
+  outside the profile-name grammar. UI, MCP, export, results, errors and logs see
+  only protocol/host/port, the assignment name and credential status. Apply takes
+  credentials in the POST body only. Review URLs and pages never include them.
 - Apply reuses the ADR 0013 stop → atomic write → start → verify transition.
   The owner panel reports `proxy: {"name": ...}` per profile, and verification
   compares both the file and that report. An unassigned profile uses its existing
@@ -47,6 +48,19 @@ proxy secret and no assignment, it creates `legacy_<profile>` from the parsed
 URI, copies the decoded username/password into the named secret and assigns the
 profile. The legacy secret is left in place. Migration is reviewed as a diff and
 applied like any other change; an unparsable legacy URI blocks it entirely.
+IPv6 is stored without brackets and bracketed when building or displaying a URI.
+
+Existing endpoints without `legacy_credentials: false` can still use an
+unambiguous credential under `("proxy", name)` or its
+`TELELOOM_PROXY_<NAME>` override. A populated old slot that overlaps a
+profile credential (for example endpoint `bot_token` and profile `proxy`)
+blocks the named route with no direct fallback. Edit the endpoint and re-enter
+its named proxy credentials to write an independent slot. If a previous version
+overwrote the profile credential itself, restore it from the owner's original
+secret source or re-authenticate that profile. Teleloom retains the old slot
+and cannot reconstruct overwritten values. New endpoints and re-entered
+credentials persist `legacy_credentials: false` so removing a new credential
+cannot re-enable an old slot.
 
 ## Route check
 

@@ -7,6 +7,18 @@ from keyring.errors import KeyringError
 
 from .models import TeleloomError
 
+# Profile names start with a letter; this keyring and env namespace cannot overlap.
+NAMED_PROXY = "_named_proxy"
+_PROFILE_CREDENTIALS = {
+    "api_id",
+    "api_hash",
+    "session",
+    "bot_token",
+    "proxy",
+    "openai_transcription_key",
+    "groq_transcription_key",
+}
+
 
 class Secrets:
     """OS credentials, with explicit environment overrides; never plaintext files."""
@@ -30,11 +42,11 @@ class Secrets:
             None,
         )
 
-    def get(self, profile: str, name: str) -> str | None:
+    def get(self, profile: str, name: str, *, environment: bool = True) -> str | None:
         variable = (
             f"TELELOOM_{profile.upper()}_{name.upper()}" if profile else f"TELELOOM_{name.upper()}"
         )
-        if value := os.getenv(variable):
+        if environment and (value := os.getenv(variable)):
             return value
         try:
             backend = self.backend()
@@ -43,6 +55,19 @@ class Secrets:
             raise TeleloomError(
                 "credentials_unavailable", f"Configure an OS keyring or set {variable}."
             ) from None
+
+    def named_proxy(self, name: str, *, legacy: bool) -> str | None:
+        value = self.get(NAMED_PROXY, name)
+        if value is not None or not legacy:
+            return value
+        value = self.get("proxy", name)
+        if value is not None and name in _PROFILE_CREDENTIALS:
+            raise TeleloomError(
+                "proxy_credentials_ambiguous",
+                "Re-enter the named proxy credentials in the proxy catalogue. "
+                "The old slot overlaps a profile credential; no alternate route was selected.",
+            )
+        return value
 
     def require(self, profile: str, name: str) -> str:
         value = self.get(profile, name)
