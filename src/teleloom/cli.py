@@ -8,11 +8,13 @@ import secrets
 import shutil
 import subprocess
 import sys
+import webbrowser
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -23,7 +25,7 @@ from . import __version__
 from .adapters import user_client
 from .auth import code_login, identity, qr_login
 from .config import Limits, Profile, Settings, validate_name
-from .daemon import bridge, ownership, session, stop_daemon
+from .daemon import bridge, ensure_daemon, ownership, session, stop_daemon
 from .daemon import serve as run_daemon
 from .digest import digest_validate_command
 from .evaluation import benchmark_command, evaluate_command
@@ -514,6 +516,41 @@ def serve_command() -> None:
 def mcp_command() -> None:
     """Run the stdio MCP bridge, auto-starting the loopback daemon when needed."""
     asyncio.run(bridge(Settings.load()))
+
+
+@app.command("ui")
+@guarded
+def ui_command(open_browser: bool = typer.Option(True, "--open/--no-open")) -> None:
+    """Open a protected, read-only owner panel in the browser via a one-time bootstrap."""
+    settings = Settings.load()
+    token = Secrets().require("", "mcp_token")
+
+    async def launch() -> dict[str, Any]:
+        await ensure_daemon(settings, token)
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as http:
+            response = await http.post(
+                settings.url.removesuffix("/mcp") + "/ui/bootstrap",
+                headers={"Authorization": "Bearer " + token},
+            )
+        if response.status_code != 200:
+            raise TeleloomError(
+                "panel_unavailable",
+                "The running owner did not issue a browser bootstrap; stop it and retry from this installation.",
+            )
+        return response.json()
+
+    result = asyncio.run(launch())
+    opened = False
+    if open_browser:
+        try:
+            opened = bool(webbrowser.open(result["url"]))
+        except (webbrowser.Error, OSError):
+            opened = False
+        if not opened:
+            typer.echo("Browser could not open; use the printed url.", err=True)
+    typer.echo(
+        json.dumps({"url": result["url"], "expires_at": result["expires_at"], "opened": opened})
+    )
 
 
 @app.command("stop")
