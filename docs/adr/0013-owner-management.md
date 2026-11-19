@@ -149,16 +149,12 @@ projection, no restart.
   compares the observed `workspace_id` (and `service`) from `/health` with its own
   fingerprint and records the observed `owner_id`/version. A foreign or replaced
   owner therefore fails verification instead of being reported as success.
-- Effective exposure: only a process holding the bearer can list registered tools,
-  so `Lifecycle.observed` opens one ordinary MCP session (`daemon.session`) and reads
-  `tools/list` plus `server_status`. It reads the bearer from the OS store for that
-  call and never stores or hands it to the browser; it is not a second credential.
-  The restart counts as verified only when the observed `workspace_id`, `build`,
-  `scope.tool_exposure` and `tools/list` agree with the selection: `selected` must
-  list exactly the chosen names, `all` every registered tool, `read-only` a subset
-  of them. Any difference reports the mismatch and the durable configuration instead
-  of claiming success. The UI states that the MCP client must reconnect to refresh
-  its discovery cache.
+- Effective exposure: control bootstraps a loopback panel session, reads its
+  effective scope and catalogue, and compares the exposed names with MCP
+  `tools/list`. This verification also works with a selected set that hides
+  `server_status`. The authenticated `/health` supplies the running build and
+  workspace. Control reports a mismatch against the reviewed change and asks
+  clients to reconnect so they refresh their discovery cache.
 
 ## Implementation surface (work/teleloom-23)
 

@@ -21,8 +21,9 @@ failover, health scheduler, MTProxy or automatic routing is included.
   `stored`/`absent`. Apply takes credentials in the POST body only; review URLs
   and review pages never carry or re-render them.
 - Apply reuses the ADR 0013 stop → atomic write → start → verify transition.
-  The owner reports `proxy: {"name": ...}` per profile in `server_status`, and
-  verification compares both the file and that live report. A stale revision is
+  The owner panel reports `proxy: {"name": ...}` per profile, and verification
+  compares both the file and that report. An unassigned profile uses its existing
+  per-profile route, if configured, and is shown as the profile default. A stale revision is
   refused with 409; invalid protocol/host/port/name or an unknown assignment is
   refused with 422 before anything is written or stopped.
 
@@ -49,7 +50,7 @@ applied like any other change; an unparsable legacy URI blocks it entirely.
 
 ## Route check
 
-`GET /control/proxies?check=<name>` is a separate, explicitly requested action,
+`POST /control/proxies/check` is an owner-session and CSRF-protected action,
 never part of opening the page. It opens one TCP connection to the configured
 host/port with a clamped 0.05–10 s deadline, never sends credentials, performs no
 Telegram RPC and reports `reachable`/`timeout`/`unavailable` with
