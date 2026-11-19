@@ -17,6 +17,34 @@ from tests.release_fixtures import RELEASE_TAG, invoke
 pytestmark = [pytest.mark.xdist_group("release"), pytest.mark.release_e2e, pytest.mark.process_e2e]
 
 
+def test_owner_snapshot_treats_implicit_and_explicit_local_transcription_as_equal(
+    tmp_path, monkeypatch
+):
+    from scripts.release_probe import snapshot
+    from teleloom.config import Profile, Settings
+    from teleloom.runtime import Runtime
+
+    Settings(data_dir=tmp_path, profiles={"work": Profile(kind="user")}).save()
+    original = Runtime.profiles
+    provider = None
+
+    def profiles(runtime):
+        value = original(runtime)
+        engines = value["profiles"][0]["capabilities"]["transcription_engines"]
+        if provider is None:
+            del engines["default_provider"]
+        else:
+            engines["default_provider"] = provider
+        return value
+
+    monkeypatch.setattr(Runtime, "profiles", profiles)
+    legacy = snapshot(tmp_path)["capabilities"]
+    provider = "local"
+    assert snapshot(tmp_path)["capabilities"] == legacy
+    provider = "groq"
+    assert snapshot(tmp_path)["capabilities"] != legacy
+
+
 @pytest.fixture(scope="session")
 def previous_wheel(real_release):
     source, output, commit = real_release
