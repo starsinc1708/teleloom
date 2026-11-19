@@ -355,6 +355,7 @@ async def test_unsupported_endpoint_model_and_absent_model_refuse_before_stop(
     "endpoint",
     [
         "https://[::1",
+        "https://[v1.test]/v1",
         "https://provider.invalid:70000/v1",
         "https://provider.invalid:bad/v1",
         "https://provider.invalid:0/v1",

@@ -33,7 +33,8 @@ def external_endpoint(value: str | None) -> str:
     try:
         parsed = urlsplit(value)
         hostname, port = parsed.hostname, parsed.port
-    except ValueError:
+        httpx.URL(value)
+    except (ValueError, httpx.InvalidURL):
         raise TeleloomError("invalid_endpoint", "Malformed transcription endpoint.") from None
     if (
         not hostname
