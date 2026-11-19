@@ -1,5 +1,6 @@
 """#28: named proxy catalogue, explicit per-profile assignment, no direct fallback."""
 
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from typing import Any
@@ -12,14 +13,18 @@ from teleloom import adapters, control, control_proxies
 from teleloom.config import Profile, Settings
 from teleloom.models import TeleloomError
 from teleloom.secrets import Secrets
-from tests.test_panel_control_policy import (
-    digest,
-    session_csrf,
-    write_config,
-)
 
 PASSWORD = "s3cret-pass"
 LEGACY = "socks5://legacy-user:legacy-pass@legacy.local:1080"
+
+
+def digest(path):
+    return hashlib.sha256((path / "config.json").read_bytes()).hexdigest()
+
+
+async def csrf(http):
+    page = await http.get("/control")
+    return page.text.split('name="csrf" value="', 1)[1].split('"', 1)[0]
 
 
 def fake_keyring(monkeypatch) -> dict[str, str]:
@@ -76,11 +81,6 @@ class FakeLifecycle:
         }
 
 
-def instance(tmp_path, monkeypatch) -> control.Control:
-    write_config(tmp_path)
-    return control.Control(Settings.load(tmp_path), [], lifecycle=FakeLifecycle())
-
-
 @asynccontextmanager
 async def login(instance: control.Control):
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=instance), base_url=instance.origin)
@@ -102,7 +102,7 @@ async def review(http, params: list[tuple[str, str]]) -> httpx.Response:
 async def apply(http, instance, revision: str, **fields: str) -> httpx.Response:
     return await http.post(
         "/control/proxies/apply",
-        data={"csrf": session_csrf(instance), "revision": revision, **fields},
+        data={"csrf": await csrf(http), "revision": revision, **fields},
         headers={"Origin": instance.origin},
     )
 
@@ -159,7 +159,7 @@ async def test_create_assign_two_profiles_apply_and_no_plaintext(tmp_path, monke
             raise OSError
 
         monkeypatch.setattr(control_proxies.asyncio, "open_connection", failed_connect)
-        fields = {"name": "corp", "csrf": session_csrf(instance)}
+        fields = {"name": "corp", "csrf": await csrf(http)}
         refused = await http.post(
             "/control/proxies/check", data=fields, headers={"Origin": "https://outside.invalid"}
         )
@@ -258,6 +258,8 @@ async def test_invalid_endpoint_and_unknown_assignment_are_refused_before_write(
             {"protocol": "http", "host": "http://proxy.local", "port": "8080"},
             {"protocol": "http", "host": "proxy.local", "port": "0"},
             {"protocol": "http", "host": "proxy.local/path", "port": "8080"},
+            {"protocol": "http", "host": "proxy..local", "port": "8080"},
+            {"protocol": "http", "host": "999.1.2.3", "port": "8080"},
         ):
             refused = await review(
                 http, [("action", "endpoint"), ("name", "corp"), ("review", "1"), *fields.items()]
@@ -327,5 +329,8 @@ async def test_missing_endpoint_never_falls_back_to_direct(tmp_path, monkeypatch
 
 
 def make_control_proxy(tmp_path) -> control.Control:
-    write_config(tmp_path)
-    return control.Control(Settings.load(tmp_path), [], lifecycle=FakeLifecycle())
+    settings = Settings(
+        data_dir=tmp_path, profiles={"personal": Profile(kind="user"), "work": Profile(kind="bot")}
+    )
+    settings.save()
+    return control.Control(settings, [], lifecycle=FakeLifecycle())

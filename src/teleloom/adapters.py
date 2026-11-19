@@ -6,7 +6,7 @@ import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -151,10 +151,17 @@ def proxy_url(
     try:
         stored = json.loads(secret) if secret else {}
     except ValueError:
-        stored = {}
-    stored = stored if isinstance(stored, dict) else {}
-    username = str(stored.get("username") or "")
-    password = str(stored.get("password") or "")
+        stored = None
+    if not isinstance(stored, dict) or any(
+        not isinstance(stored.get(field, ""), str) for field in ("username", "password")
+    ):
+        raise TeleloomError("invalid_proxy", "The named proxy credential could not be read.")
+    username = stored.get("username", "")
+    password = stored.get("password", "")
+    if password and (not username or endpoint.protocol == "socks4"):
+        raise TeleloomError(
+            "invalid_proxy", "The named proxy credential is invalid for its protocol."
+        )
     auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username else ""
     return f"{endpoint.protocol}://{auth}{endpoint.host}:{endpoint.port}"
 
@@ -193,8 +200,12 @@ def user_client(
             "proxy_type": parsed.scheme,
             "addr": parsed.hostname,
             "port": parsed.port,
-            "username": parsed.username,
-            "password": parsed.password,
+            "username": unquote(parsed.username)
+            if profile.proxy and parsed.username
+            else parsed.username,
+            "password": unquote(parsed.password)
+            if profile.proxy and parsed.password
+            else parsed.password,
             "rdns": True,
         }
     from .session_state import SavedMetadataSession

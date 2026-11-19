@@ -139,6 +139,10 @@ def migrate(
             continue
         try:
             parsed = urlparse(legacy)
+            if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+                raise ValueError("Legacy route has unsupported URI components")
+            if parsed.password and (not parsed.username or parsed.scheme == "socks4"):
+                raise ValueError("Legacy route has unsupported credentials")
             name = f"legacy_{profile}"[:64]
             validate_proxy_name(name)
             endpoint = _endpoint(parsed.scheme, parsed.hostname or "", str(parsed.port or ""))

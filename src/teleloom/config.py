@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import uuid
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Literal
 
@@ -91,7 +92,13 @@ class ProxyEndpoint(BaseModel):
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str) -> str:
-        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", value):
+        labels = value.split(".")
+        if all(label.isascii() and label.isdigit() for label in labels):
+            IPv4Address(value)
+        elif any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in labels
+        ):
             raise ValueError("Proxy host must be a bare hostname or IPv4 address, without scheme.")
         return value
 
