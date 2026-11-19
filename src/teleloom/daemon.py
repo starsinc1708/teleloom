@@ -257,22 +257,17 @@ async def health(settings: Settings, token: str, *, report_timeout: bool = False
 
 
 async def ensure_daemon(settings: Settings, token: str, *, handoff: str | None = None) -> None:
-    gate = control_lock(settings)
-    try:
-        gate.acquire()
-        gate.release()
-    except Timeout:
-        raise TeleloomError(
-            "transition_in_progress",
-            "Owner management is active; the owner will be started by it. Retry after it reports.",
-        ) from None
-    if handoff is None and (pending := live_transition(settings)) is not None:
-        raise TeleloomError(
-            "transition_in_progress",
-            f"Owner management is at phase '{pending['phase']}'; the owner is started by it.",
-        )
+    def check_transition() -> None:
+        if handoff is None and (pending := live_transition(settings)) is not None:
+            raise TeleloomError(
+                "transition_in_progress",
+                f"Owner management is at phase '{pending['phase']}'; the owner is started by it.",
+            )
+
+    check_transition()
     if await health(settings, token):
         return
+    gate = control_lock(settings)
     lock = FileLock(settings.data_dir / "startup.lock", timeout=15)
     try:
         # Nonblocking polling avoids holding the event loop in FileLock.acquire.
@@ -288,6 +283,16 @@ async def ensure_daemon(settings: Settings, token: str, *, handoff: str | None =
                     ) from None
                 await asyncio.sleep(0.1)
         try:
+            # Only the serialized starter probes the management lock. Ordinary
+            # bridge callers must not contend with each other or the owner booting.
+            try:
+                with gate:
+                    check_transition()
+            except Timeout:
+                raise TeleloomError(
+                    "transition_in_progress",
+                    "Owner management is active; retry after it reports.",
+                ) from None
             if await health(settings, token):
                 return
             env = {
