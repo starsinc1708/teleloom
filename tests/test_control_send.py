@@ -9,6 +9,7 @@ import asyncio
 import re
 import socket
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -77,7 +78,11 @@ class FakeOwner:
         self.calls.append(("preview", profile, chat, text))
         payload = {
             "profile_id": profile,
-            "account": {"kind": "user", "identity": {"id": "42", "username": "owner"}},
+            "account": {
+                "kind": "user",
+                "generation": self.settings.profile(profile).generation,
+                "identity": {"id": "42", "username": "owner"},
+            },
             "recipients": [chat],
             "text": text,
             "reply_to_message_id": None,
@@ -138,7 +143,9 @@ class FakeOwner:
 
 def config_file(tmp_path, data=None):
     (tmp_path / "config.json").write_text(__import__("json").dumps(data or BASE), "utf-8")
-    return Settings.load(tmp_path)
+    settings = Settings.load(tmp_path)
+    settings.save()
+    return settings
 
 
 async def open_control(settings: Settings, owner: FakeOwner | None = None):
@@ -266,7 +273,9 @@ async def test_confirm_needs_the_reviewed_hash_and_creates_one_durable_job(tmp_p
 
         form = {"csrf": csrf, "profile": "personal", "plan_id": plan_id}
         tampered = await submit(
-            client, "/control/send/confirm", {**form, "plan_hash": reviewed[:-1] + "0"}
+            client,
+            "/control/send/confirm",
+            {**form, "plan_hash": reviewed[:-1] + ("1" if reviewed[-1] == "0" else "0")},
         )
         assert tampered.status_code == 409 and "Nothing was sent" in tampered.text
         assert [call[0] for call in owner.calls] == ["preview"]
@@ -402,107 +411,120 @@ async def test_lost_execute_answer_reports_the_durable_job_and_never_replays(tmp
         assert [call[0] for call in owner.calls] == ["preview", "execute"]
 
 
-@pytest.mark.asyncio
-async def test_real_owner_sends_one_exact_message_and_shows_its_receipt(tmp_path, monkeypatch):
-    settings = Settings(
-        data_dir=tmp_path,
-        port=free_port(),
-        profiles={"personal": Profile(kind="user")},
-        limits=Limits(interval_seconds=1),
-    )
-    settings.save()
-    monkeypatch.setenv("TELELOOM_MCP_TOKEN", TOKEN)
-    apis: list[TelegramAPI] = []
-
-    def factory(*args):
-        api = TelegramAPI(*args)
-        apis.append(api)
-        return api
-
-    app = create_application(settings, TOKEN, factory)
+@asynccontextmanager
+async def serve(app, *, port=0, sockets=None):
     server = uvicorn.Server(
-        uvicorn.Config(
-            app, host="127.0.0.1", port=settings.port, log_level="critical", access_log=False
-        )
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="critical", access_log=False)
     )
-    task = asyncio.create_task(server.serve())
-    control_task = None
-    control_server = None
+    task = asyncio.create_task(server.serve(sockets=sockets))
     try:
         async with asyncio.timeout(10):
             while not server.started:
                 await asyncio.sleep(0.01)
-        instance = control.Control(settings, CATALOGUE)  # the real MCP Owner client
-        control_server = uvicorn.Server(
-            uvicorn.Config(instance, log_level="critical", access_log=False)
-        )
-        control_task = asyncio.create_task(control_server.serve(sockets=[instance.socket]))
-        async with asyncio.timeout(10):
-            while not control_server.started:
-                await asyncio.sleep(0.01)
-        async with httpx.AsyncClient(base_url=instance.origin, trust_env=False) as client:
-            assert (await client.get("/control/send")).status_code == 401
-            await login(client, instance)
-            page = await client.get("/control/send")
-            assert page.status_code == 200 and "Preview this exact send" in page.text
-            assert all(api.sent == [] for api in apis)
-
-            accepted = await submit(
-                client,
-                "/control/send/preview",
-                {
-                    "csrf": csrf_of(page.text),
-                    "profile": "personal",
-                    "chat_id": "100",
-                    "text": "Привет, мир",
-                },
-            )
-            assert accepted.status_code == 303, accepted.text
-            review = await client.get(accepted.headers["location"])
-            assert review.status_code == 200, review.text
-            assert "Engineering" in review.text and "Привет, мир" in review.text
-            assert apis[0].sent == []  # a preview resolves the target and sends nothing
-
-            confirmed = await submit(
-                client,
-                "/control/send/confirm",
-                {
-                    "csrf": csrf_of(review.text),
-                    "profile": "personal",
-                    "plan_id": accepted.headers["location"].split("/plan/")[1].split("?")[0],
-                    "plan_hash": hash_of(review.text),
-                },
-            )
-            assert confirmed.status_code == 303, confirmed.text
-            location = confirmed.headers["location"]
-            for _ in range(60):
-                receipt = await client.get(location)
-                if "completed" in receipt.text:
-                    break
-                await asyncio.sleep(0.1)
-            assert "completed" in receipt.text, receipt.text
-            assert [(row[0], row[1]) for row in apis[0].sent] == [("100", "Привет, мир")]
-            assert "/ui/jobs/" in receipt.text and f"port={settings.port}" not in receipt.text
-
-            again = await submit(
-                client,
-                "/control/send/confirm",
-                {
-                    "csrf": csrf_of(review.text),
-                    "profile": "personal",
-                    "plan_id": accepted.headers["location"].split("/plan/")[1].split("?")[0],
-                    "plan_hash": hash_of(review.text),
-                },
-            )
-            assert again.status_code == 303  # a stale page reopens the same job
-            assert again.headers["location"] == location
-            assert len(apis[0].sent) == 1
+        yield
     finally:
-        if control_task is not None and control_server is not None:
-            control_server.should_exit = True
-            await asyncio.wait_for(control_task, timeout=15)
         server.should_exit = True
         await asyncio.wait_for(task, timeout=15)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_real_owner_durable_send_and_restart(tmp_path, monkeypatch, interrupt):
+    settings = Settings(
+        data_dir=tmp_path,
+        port=free_port(),
+        profiles={
+            "personal": Profile(kind="user", read_mode="selected", read_chats=["100"]),
+            "other": Profile(kind="user"),
+        },
+        limits=Limits(interval_seconds=1),
+    )
+    settings.save()
+    monkeypatch.setenv("TELELOOM_MCP_TOKEN", TOKEN)
+    attempted = asyncio.Event()
+    apis = []
+
+    class SendAPI(TelegramAPI):
+        async def send(self, *args):
+            result = await super().send(*args)
+            attempted.set()
+            if interrupt:
+                await asyncio.Future()
+            return result
+
+    def factory(*args):
+        api = SendAPI(*args)
+        apis.append(api)
+        return api
+
+    instance = control.Control(settings, CATALOGUE)
+    async with serve(instance, sockets=[instance.socket]):
+        async with httpx.AsyncClient(base_url=instance.origin, trust_env=False) as client:
+            app = create_application(settings, TOKEN, factory)
+            async with serve(app, port=settings.port):
+                assert (await client.get("/control/send")).status_code == 401
+                await login(client, instance)
+                page = await client.get("/control/send")
+                assert page.status_code == 200 and "Preview this exact send" in page.text
+                assert apis == []
+
+                text = "  \u041f\u0440\u0438\u0432\u0435\u0442 <b>&</b>\r\nSecond line \U0001f680  "
+                form = {"csrf": csrf_of(page.text), "profile": "personal", "text": text}
+                denied = await submit(client, "/control/send/preview", {**form, "chat_id": "200"})
+                assert denied.status_code == 403 and "read_not_allowed" in denied.text
+                assert apis == []
+                accepted = await submit(client, "/control/send/preview", {**form, "chat_id": "100"})
+                assert accepted.status_code == 303, accepted.text
+                review_url = accepted.headers["location"]
+                review = await client.get(review_url)
+                assert review.status_code == 200, review.text
+                assert "Engineering" in review.text and "&lt;b&gt;&amp;&lt;/b&gt;" in review.text
+                assert apis[0].sent == [] and apis[0].ack == []
+
+                plan_id = urlsplit(review_url).path.rsplit("/", 1)[1]
+                confirm = {
+                    "csrf": csrf_of(review.text),
+                    "profile": "personal",
+                    "plan_id": plan_id,
+                    "plan_hash": hash_of(review.text),
+                }
+                denied = await submit(
+                    client, "/control/send/confirm", {**confirm, "profile": "other"}
+                )
+                assert denied.status_code == 404
+                assert apis[0].sent == []
+                first, second = await asyncio.gather(
+                    submit(client, "/control/send/confirm", confirm),
+                    submit(client, "/control/send/confirm", confirm),
+                )
+                assert first.status_code == second.status_code == 303
+                location = first.headers["location"]
+                assert location == second.headers["location"]
+                await asyncio.wait_for(attempted.wait(), 5)
+                assert [(row[0], row[1]) for row in apis[0].sent] == [("100", text)]
+                if not interrupt:
+                    async with asyncio.timeout(7):
+                        while "completed" not in (await client.get(location)).text:
+                            await asyncio.sleep(0.05)
+
+            restarted = create_application(settings, TOKEN, factory)
+            async with serve(restarted, port=settings.port):
+                # A fresh browser session does not replay the previous confirmation.
+                client.cookies.clear()
+                assert (await client.get(location)).status_code == 401
+                await login(client, instance)
+                receipt = await client.get(location)
+                assert receipt.status_code == 200, receipt.text
+                assert ("Outcome unknown" if interrupt else "completed") in receipt.text
+                assert f"http://127.0.0.1:{settings.port}/ui/jobs/" in receipt.text
+                review = await client.get(review_url)
+                assert "Already confirmed" in review.text
+                assert "Confirm and send this exact message" not in review.text
+                confirm["csrf"] = csrf_of((await client.get("/control/send")).text)
+                reopened = await submit(client, "/control/send/confirm", confirm)
+                assert reopened.status_code == 303
+                assert reopened.headers["location"] == location
+                assert len(apis) == 1 and len(apis[0].sent) == 1
 
 
 @pytest.mark.asyncio
@@ -521,3 +543,11 @@ async def test_send_refuses_an_exposure_that_hides_the_delivery_tools(tmp_path):
         assert page.status_code == 200
         assert "does not register delivery_preview, delivery_execute" in page.text
         assert '<button type="submit">Preview this exact send</button>' not in page.text
+
+        blocked = await submit(
+            client,
+            "/control/send/preview",
+            {"csrf": csrf_of(page.text), "profile": "personal", "chat_id": "100", "text": "x"},
+        )
+        assert blocked.status_code == 503
+        assert instance.owner.calls == []

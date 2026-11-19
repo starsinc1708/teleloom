@@ -13,18 +13,17 @@ bearer is read from the OS store for each call (as ``Lifecycle.observed`` does)
 and no header, cookie, query flag or MCP tool supplies the human step.
 """
 
-import asyncio
 import hmac
 import html
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
-import httpx
 from mcp.shared.exceptions import McpError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from .config import Settings
 from .control_policy import chat_id as exact_chat
 from .models import TeleloomError, utcnow
 from .store import Store
@@ -49,9 +48,6 @@ _HTTP = {
     "send_unavailable": 503,
 }
 
-# Two Confirm clicks in this process serialize; the durable plan row is the idempotency record.
-_confirming = asyncio.Lock()
-
 
 class Owner:
     """The owner's MCP surface; the bearer stays inside each call, never in a response."""
@@ -73,10 +69,16 @@ class Owner:
                 f"This owner does not expose {tool}. Widen the tool exposure and retry; "
                 "nothing was sent.",
             ) from None
-        except (httpx.HTTPError, OSError):
+        except Exception:
+            # MCP transport teardown may wrap connection failures in an ExceptionGroup.
             raise TeleloomError(
                 "owner_unavailable",
-                "The owner did not answer. Run teleloom serve, then reload; nothing was sent.",
+                (
+                    "The owner did not answer the confirmation. Reopen this plan to check its "
+                    "durable state before creating another preview."
+                    if tool == "delivery_execute"
+                    else "The owner did not answer. Check that teleloom serve is running and reload."
+                ),
             ) from None
         if result.isError or not result.structuredContent:
             # A refusal is the owner's own code and message, never this page's invention.
@@ -130,6 +132,19 @@ def plan(settings: Any, profile: str, plan_id: str) -> dict[str, Any]:
         raise TeleloomError(
             "plan_not_found", "No reviewed preview has this identity. Start a new preview."
         )
+    payload = found["payload"]
+    recipients = payload.get("recipients") or []
+    if (
+        not payload.get("owner_authorized")
+        or payload.get("format") != "plain_text"
+        or payload.get("broadcast")
+        or payload.get("reply_to_message_id") is not None
+        or "operation" in payload
+        or len(recipients) != 1
+    ):
+        raise TeleloomError(
+            "plan_not_found", "This preview is outside the one-message send workflow."
+        )
     return found
 
 
@@ -146,6 +161,13 @@ def _missing(instance: Any) -> list[str]:
     else:
         exposed = set(instance.names)
     return [name for name in TOOLS if name not in exposed]
+
+
+def _require_tools(instance: Any) -> None:
+    if missing := _missing(instance):
+        raise TeleloomError(
+            "send_unavailable", "This owner does not register " + ", ".join(missing) + "."
+        )
 
 
 def _guard(instance: Any, request: Request, *, mutation: bool) -> Any:
@@ -321,6 +343,7 @@ async def preview(instance: Any, request: Request) -> Response:
     typed = (form.get("chat_id") or [""])[0]
     text = (form.get("text") or [""])[0]
     try:
+        _require_tools(instance)
         instance.settings.profile(profile)
         chat = exact_chat(typed)
         plan_id = (await _owner(instance).preview(profile, chat, text))["plan_id"]
@@ -348,7 +371,16 @@ def plan_page(instance: Any, request: Request) -> Response:
         return found
     profile = request.query_params.get("profile") or ""
     try:
+        _require_tools(instance)
         reviewed = plan(instance.settings, profile, request.path_params["plan_id"])
+        config = Settings.load(instance.settings.data_dir).profile(profile)
+        config.require_read(reviewed["payload"]["recipients"][0])
+        account = reviewed["payload"]["account"]
+        if account.get("generation") != config.generation:
+            raise TeleloomError(
+                "account_changed",
+                "This preview belongs to a previous account. Create a fresh preview.",
+            )
     except TeleloomError as exc:
         return _refused(instance, exc)
     return _review(instance, found[1].csrf, profile, reviewed)
@@ -366,27 +398,28 @@ async def confirm(instance: Any, request: Request) -> Response:
     profile = (form.get("profile") or [""])[0]
     plan_id = (form.get("plan_id") or [""])[0]
     submitted = (form.get("plan_hash") or [""])[0]
-    async with _confirming:
+    async with instance.send_confirming:
         try:
             reviewed = plan(instance.settings, profile, plan_id)
+            if not hmac.compare_digest(submitted.encode(), str(reviewed["hash"]).encode()):
+                raise TeleloomError(
+                    "plan_changed",
+                    "This confirmation does not match the reviewed preview. Nothing was sent by this action.",
+                )
             job_id = reviewed.get("job_id")
             if not job_id:
-                # Only the exact reviewed preview can be confirmed, never a request field.
-                if not hmac.compare_digest(submitted.encode(), str(reviewed["hash"]).encode()):
-                    raise TeleloomError(
-                        "plan_changed",
-                        "This confirmation does not match the reviewed preview. Nothing was sent.",
-                    )
+                _require_tools(instance)
+        except TeleloomError as exc:
+            return _refused(instance, exc)
+        if not job_id:
+            try:
                 result = await _owner(instance).execute(profile, plan_id, reviewed["hash"])
                 job_id = result["job_id"]
-        except TeleloomError as exc:
-            # An answer may have been lost after the job was written: report what is durable.
-            try:
+            except TeleloomError as exc:
+                # The answer may have been lost after the owner committed the job.
                 job_id = plan(instance.settings, profile, plan_id).get("job_id")
-            except TeleloomError:
-                job_id = None
-            if not job_id:
-                return _refused(instance, exc)
+                if not job_id:
+                    return _refused(instance, exc)
     return RedirectResponse(
         f"/control/send/job/{quote(str(job_id))}?profile={quote(profile)}",
         status_code=303,

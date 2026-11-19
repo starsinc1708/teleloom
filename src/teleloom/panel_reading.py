@@ -6,6 +6,7 @@ frozen owner snapshot and re-checks current exposure, read policy, account
 generation and snapshot expiry before any text is disclosed.
 """
 
+import asyncio
 import hmac
 import html
 from datetime import datetime
@@ -21,7 +22,6 @@ from .rich_reads import scoped_evidence
 from .runtime import number
 
 PAGE = 10
-READ_TOOL = "messages_search_many_start"
 BUDGETS = {"max_messages": 10000, "max_characters": 1000000, "max_requests": 1000}
 DEFAULTS = {"max_messages": "1000", "max_characters": "100000", "max_requests": "200"}
 
@@ -41,6 +41,8 @@ _ERRORS = {
     "invalid_range": "Provide a start and a later exclusive end, both with a timezone.",
     "invalid_time": "Dates must include a timezone.",
     "invalid_query": "A query must contain 1–1000 characters.",
+    "invalid_id": "Provide canonical numeric chat IDs.",
+    "read_timeout": "The owner timed out while resolving the selected chats.",
     "invalid_budget": "Each budget must be a whole number within its stated limit.",
     "read_not_allowed": "A selected chat is outside the current read policy.",
     "tool_not_exposed": "Reading is disabled by the owner's exposure policy.",
@@ -51,9 +53,10 @@ def _esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _exposure(settings: Any) -> None:
-    # Same rule as the MCP gate: read-only exposure always admits the read workflow.
-    if settings.exposure_mode == "selected" and READ_TOOL not in settings.exposed_tools:
+def _exposure(settings: Any, *tools: str) -> None:
+    if settings.exposure_mode == "selected" and any(
+        tool not in settings.exposed_tools for tool in tools
+    ):
         raise TeleloomError(
             "tool_not_exposed", "Reading is disabled by the owner's tool exposure policy."
         )
@@ -98,7 +101,12 @@ def _params(values: dict[str, Any]) -> dict[str, Any]:
         raise TeleloomError("invalid_query", "A query must contain 1–1000 characters.")
     budgets: dict[str, int] = {}
     for key, ceiling in BUDGETS.items():
-        if not values[key].isdigit() or not 1 <= int(values[key]) <= ceiling:
+        if (
+            not values[key].isascii()
+            or not values[key].isdigit()
+            or len(values[key]) > len(str(ceiling))
+            or not 1 <= int(values[key]) <= ceiling
+        ):
             raise TeleloomError("invalid_budget", f"{key} must be 1..{ceiling}.")
         budgets[key] = int(values[key])
     return {
@@ -113,9 +121,12 @@ def _params(values: dict[str, Any]) -> dict[str, Any]:
 
 def _check(panel: Any, params: dict[str, Any]) -> None:
     """Current exposure and read policy, before anything is started or shown."""
-    _exposure(panel.settings)
+    tool = "messages_search_many_start" if params["query"] else "digest_context_many_start"
+    _exposure(panel.settings, tool, "jobs_results", "jobs_status")
     profile = panel.settings.profile(params["profile"])
     for chat in params["chats"]:
+        if not chat.isascii() or not chat.removeprefix("-").isdigit():
+            raise TeleloomError("invalid_id", "Provide canonical numeric chat IDs.")
         number(chat)
         profile.require_read(chat)
 
@@ -220,6 +231,8 @@ async def start(panel: Any, request: Request) -> Response:
     found = panel._session(request)
     if found is None:
         return panel._locked(request)
+    if panel.runtime.worker is None:
+        return _unavailable(panel)
     length = request.headers.get("content-length", "0")
     if not length.isdigit() or int(length) > 8192:
         return JSONResponse({"error": "request_too_large"}, status_code=413)
@@ -235,7 +248,15 @@ async def start(panel: Any, request: Request) -> Response:
     try:
         params = _params(values)
         _check(panel, params)
-        selection = await panel.runtime.selection(params["profile"], None, params["chats"])
+        try:
+            async with asyncio.timeout(panel.settings.read_timeout_seconds):
+                selection = await panel.runtime.invoke(
+                    lambda: panel.runtime.selection(params["profile"], None, params["chats"])
+                )
+        except TimeoutError:
+            raise TeleloomError(
+                "read_timeout", "Could not resolve chats before the deadline."
+            ) from None
         job = await panel.runtime.jobs.evidence_start(
             params["profile"],
             selection,
@@ -264,7 +285,7 @@ async def start(panel: Any, request: Request) -> Response:
 def _source(item: dict[str, Any]) -> str:
     parts = []
     link = item.get("link")
-    if isinstance(link, str) and link.startswith("https://"):
+    if isinstance(link, str) and link.startswith("https://t.me/"):
         parts.append(f'<a href="{_esc(link)}" rel="noreferrer noopener">{_esc(link)}</a>')
     else:
         parts.append(f"chat {_esc(item.get('chat_id'))} · message {_esc(item.get('id'))}")
@@ -351,7 +372,18 @@ def _coverage(page: dict[str, Any]) -> str:
 def _evidence(job: dict[str, Any], page: dict[str, Any]) -> str:
     status = str(page.get("status") or job["status"])
     label = _STATES.get(status, "Unrecognised state")
-    incomplete = bool(page.get("incomplete"))
+    coverage = page.get("coverage") or {}
+    incomplete = bool(
+        page.get("incomplete")
+        and (
+            not page.get("next_cursor")
+            or status != "completed"
+            or page.get("source") == "bot_updates"
+            or coverage.get("stopped_reason")
+            or page.get("unavailable")
+            or any(not chat.get("complete") for chat in coverage.get("chats", []))
+        )
+    )
     notes = {
         "running": "Frozen so far. Refresh this URL to follow the same job; it starts nothing.",
         "queued": "Queued. Refresh this URL to follow the same job; it starts nothing.",
@@ -383,6 +415,13 @@ def _evidence(job: dict[str, Any], page: dict[str, Any]) -> str:
         ),
         ("Frozen at", _esc(page.get("result_snapshot_at", "—"))),
     ]
+    if reference := page.get("evidence_ref"):
+        rows.extend(
+            [
+                ("Evidence reference", f"<code>{_esc(reference)}</code>"),
+                ("Reference expires", _esc(page.get("reference_expires_at") or "—")),
+            ]
+        )
     items = page.get("items") or []
     cells = "".join(
         f"<tr><td>{_esc(item.get('date', '—'))}</td>"
@@ -437,7 +476,10 @@ async def render(panel: Any, request: Request, job_id: str) -> Response:
     try:
         if not profile:
             raise TeleloomError("job_not_found", "A profile is required to read this job.")
+        _exposure(panel.settings, "jobs_results")
         job = panel.runtime.jobs.panel_job(profile, job_id)
+        if job["kind"] != "evidence":
+            raise TeleloomError("job_not_found", "This job is not a bounded reading collection.")
         page = await panel.runtime.jobs.results(
             profile, job_id, request.query_params.get("p") or None, PAGE
         )

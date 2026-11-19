@@ -137,6 +137,7 @@ def settings_for(tmp_path) -> Settings:
 @pytest.mark.asyncio
 async def test_preview_start_pages_and_refresh_use_one_frozen_job(tmp_path):
     settings = settings_for(tmp_path)
+    settings.exposure_mode = "read-only"
     async with running(settings) as panel:
         async with client(panel) as browser:
             assert (await browser.get("/ui/read")).status_code == 401
@@ -172,6 +173,7 @@ async def test_preview_start_pages_and_refresh_use_one_frozen_job(tmp_path):
             assert "<script>alert(20)" not in first.text
             assert "<code>100</code>" in first.text and "<code>23</code>" in first.text
             assert "https://t.me/example/23" in first.text
+            assert "Collection is incomplete" not in first.text
             assert "23 / 23" in first.text and "100000" in first.text
 
             second = await browser.get(next_link(first.text, "/ui/read/"))
@@ -234,6 +236,14 @@ async def test_reading_gates_deny_csrf_policy_exposure_generation_and_foreign_jo
             await login(browser, panel)
             # The preview is refused before any start; the job page hides frozen text.
             assert "tool_not_exposed" in (await browser.get(preview_url())).text
+            hidden = await browser.get(f"/ui/read/{job_id}?profile=work")
+            assert hidden.status_code == 403 and "tool_not_exposed" in hidden.text
+            assert "Decision" not in hidden.text
+
+    settings.exposed_tools = ["jobs_status", "messages_search_many_start"]
+    async with running(settings) as panel:
+        async with client(panel) as browser:
+            await login(browser, panel)
             hidden = await browser.get(f"/ui/read/{job_id}?profile=work")
             assert hidden.status_code == 403 and "tool_not_exposed" in hidden.text
             assert "Decision" not in hidden.text
@@ -335,6 +345,20 @@ async def test_multichat_partial_coverage_parity_with_mcp_results(tmp_path):
                 ("300", "failed"),
             ]
             assert mcp["incomplete"] is True and mcp["status"] == "completed"
+            reference = re.search(r"Evidence reference</dt><dd><code>([^<]+)", page.text).group(1)
+            original = data(
+                await create_server(settings, PartialAPI, runtime=panel.runtime).call_tool(
+                    "jobs_results",
+                    {
+                        "profile_id": "work",
+                        "job_id": job_id,
+                        "evidence_ref": reference,
+                        "message_keys": [{"chat_id": "100", "message_id": "23"}],
+                    },
+                )
+            )["data"]
+            assert original["items"][0]["text"] == "Decision 23"
+            assert original["items"][0]["profile_id"] == "work"
             assert mcp["unavailable"] == [
                 {
                     "chat_id": "300",
@@ -383,3 +407,35 @@ async def test_expired_page_cursor_reveals_nothing_and_originals_survive(tmp_pat
             # The durable originals are untouched; a fresh first page still reads them.
             assert "Decision 23" in (await browser.get(location)).text
             assert panel.runtime.adapters["work"].calls == 1
+
+
+@pytest.mark.asyncio
+async def test_budget_stops_and_invalid_numeric_input_are_visible(tmp_path):
+    settings = settings_for(tmp_path)
+    async with running(settings) as panel, client(panel) as browser:
+        await login(browser, panel)
+        for values, code in (
+            ({"chats": "--100"}, "invalid_id"),
+            ({"max_messages": "\u00b2"}, "invalid_budget"),
+            ({"max_requests": "1001"}, "invalid_budget"),
+        ):
+            preview = await browser.get(preview_url(**values))
+            assert code in preview.text
+            assert 'method="post"' not in preview.text
+        assert not panel.runtime.adapters
+
+        started = await browser.post(
+            "/ui/read",
+            data=fields(csrf_of(panel), max_messages="11"),
+            headers={"Origin": panel.origin},
+        )
+        location = started.headers["location"]
+        job_id = urlsplit(location).path.rsplit("/", 1)[1]
+        await finished(panel, job_id)
+        first = await browser.get(location)
+        assert "Collection is incomplete" in first.text
+        assert "message_budget" in first.text and "11 / 11" in first.text
+        assert first.text.count('<td style="white-space:pre-wrap">') == 10
+        second = await browser.get(next_link(first.text, "/ui/read/"))
+        assert second.text.count('<td style="white-space:pre-wrap">') == 1
+        assert "Next page" not in second.text
