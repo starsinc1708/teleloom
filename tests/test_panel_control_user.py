@@ -512,3 +512,20 @@ async def test_qr_expiry_refreshes_and_connection_owner_is_kept_until_restart(
         finish.set()
         await asyncio.wait_for(instance.user.task, 3)
         assert (await client.get("/control/user/state")).json()["phase"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_control_shutdown_cancels_qr_and_restores_owner(tmp_path):
+    config(tmp_path)
+    telegram = FakeTelegram()
+    instance, lifecycle = make(
+        tmp_path, telegram=telegram, stored={"newbie:api_id": "1", "newbie:api_hash": SECRET_HASH}
+    )
+    async with instance.app.router.lifespan_context(instance.app), client_for(instance) as client:
+        await sign_in(client, instance)
+        assert (await start_login(client, instance, name="newbie")).status_code == 202
+        await asyncio.wait_for(telegram.waiting.wait(), 3)
+    assert instance.user.task.done()
+    assert instance.user.snapshot()["phase"] == "cancelled"
+    assert lifecycle.stopped == 1 and len(lifecycle.started) == 1
+    assert "newbie" not in Settings.load(tmp_path).profiles

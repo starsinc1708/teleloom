@@ -520,6 +520,7 @@ class Control:
         self.sessions: dict[str, _Session] = {}
         self.on_ready: Callable[[], None] | None = None
         self.app = Starlette(
+            lifespan=self._lifespan,
             routes=[
                 Route("/control", self.page),
                 Route("/control/open", self.open_page),
@@ -539,7 +540,7 @@ class Control:
                 Route("/control/send/job/{job_id}", self.send_job),
                 Route("/control/clients", self.clients_page),
                 Route("/control/clients/apply", self.clients_apply, methods=["POST"]),
-            ]
+            ],
         )
         # Imported here: both modules build on this one's locks, records and session.
         from .control_bot import BotOnboarding
@@ -547,6 +548,16 @@ class Control:
 
         self.user, self.bot = Onboarding(self), BotOnboarding(self)
         self.app.routes.extend(self.user.routes() + self.bot.routes())
+
+    @asynccontextmanager
+    async def _lifespan(self, app: Starlette) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            task = self.user.task
+            if task is not None and not task.done():
+                self.user.cancelled.set()
+                await task
 
     def issue_bootstrap(self) -> dict[str, Any]:
         now = self.clock()
