@@ -8,8 +8,10 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 import yaml
+from typer.testing import CliRunner
 
 from teleloom import control
+from teleloom.cli import app
 from teleloom.config import Settings
 
 CATALOGUE = [{"name": "messages_get", "summary": "Read", "writes": False}]
@@ -536,6 +538,66 @@ async def test_review_shows_effective_config_path_and_redacted_entry_diff(tmp_pa
         assert "Preserved existing settings: enabled" in review.text
         # Only the teleloom entry is described; foreign settings stay unexposed.
         assert "owner-model" not in review.text and "https://x.test" not in review.text
+    finally:
+        instance.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows absolute path comparison")
+@pytest.mark.parametrize("client_name", ["opencode", "hermes"])
+async def test_review_and_cli_agree_on_windows_paths_and_exact_arguments(
+    tmp_path, monkeypatch, client_name
+):
+    native = FakeNative(tmp_path, monkeypatch)
+    instance = make(tmp_path)
+    monkeypatch.setenv("TELELOOM_DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+    command = ["config", "client", "--client", client_name, "--install"]
+    target = tmp_path / "skills"
+    params = {"review": "1", "client": client_name, "target": str(target)}
+    try:
+        installed = runner.invoke(app, command)
+        assert installed.exit_code == 0, installed.output
+        if client_name == "opencode":
+            path, load, dump = native.opencode, json.loads, json.dumps
+            config = load(path.read_text(encoding="utf-8"))
+            entry = config["mcp"]["servers"]["teleloom"]
+            args, command_index, env = entry["command"], 0, entry["environment"]
+        else:
+            path, load, dump = native.config, yaml.safe_load, yaml.safe_dump
+            config = load(path.read_text(encoding="utf-8"))
+            entry = config["mcp_servers"]["teleloom"]
+            args, command_index, env = entry["args"], None, entry["env"]
+        original_command = entry["command"] if command_index is None else args[command_index]
+        variant = original_command.swapcase().replace("\\", "/")
+        assert variant != original_command
+        if command_index is None:
+            entry["command"] = variant
+        else:
+            args[command_index] = variant
+        env["TELELOOM_DATA_DIR"] = env["TELELOOM_DATA_DIR"].swapcase().replace("\\", "/")
+        path.write_text(dump(config), encoding="utf-8")
+        equivalent = path.read_bytes()
+        async with await client_for(instance) as browser:
+            await login(browser, instance)
+            review = await browser.get("/control/clients", params=params)
+            assert review.status_code == 200
+            assert "existing identical" in review.text
+            assert "different teleloom entry" not in review.text
+            repeated = runner.invoke(app, command)
+            assert repeated.exit_code == 0, repeated.output
+            assert json.loads(repeated.output)["status"] == "already_configured"
+            assert path.read_bytes() == equivalent
+
+            args[-1] = args[-1].upper()
+            path.write_text(dump(config), encoding="utf-8")
+            conflict = path.read_bytes()
+            review = await browser.get("/control/clients", params=params)
+            assert "args differ" in review.text
+            refused = runner.invoke(app, command)
+            assert refused.exit_code != 0 and "client_config_conflict" in refused.output
+            assert path.read_bytes() == conflict
+        assert len(add_calls(native)) == 1
     finally:
         instance.close()
 

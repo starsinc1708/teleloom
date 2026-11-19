@@ -8,6 +8,7 @@ export fragment. Skill writes touch only the selected bundled `teleloom-*` folde
 import hashlib
 import html
 import json
+import ntpath
 import shutil
 import sys
 from pathlib import Path
@@ -201,7 +202,19 @@ def _client_paths(client: str) -> list[Path]:
         return []
 
 
-def _entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any]:
+def _same_path(saved: Any, wanted: str) -> bool:
+    return isinstance(saved, str) and (
+        saved == wanted
+        or (
+            sys.platform == "win32"
+            and ntpath.isabs(saved)
+            and ntpath.isabs(wanted)
+            and ntpath.normcase(ntpath.normpath(saved)) == ntpath.normcase(ntpath.normpath(wanted))
+        )
+    )
+
+
+def entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any]:
     """Compare the existing entry by field; foreign values stay behind their key names."""
     if not isinstance(saved, dict):
         return {
@@ -219,12 +232,14 @@ def _entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any
         current_args = command[1:] if isinstance(command, list) else None
     else:
         current, current_args = command, saved.get("args")
+    same_command = _same_path(current, entry["command"])
+    same_args = current_args == entry["args"]
     blocking: list[str] = []
     if client == "opencode" and saved.get("type") != "local":
         blocking.append("connection type is not local")
-    if current != entry["command"]:
+    if not same_command:
         blocking.append("command differs")
-    if current_args != entry["args"]:
+    if not same_args:
         blocking.append("args differ")
     env = saved.get(env_key)
     if not isinstance(env, dict):
@@ -234,10 +249,14 @@ def _entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any
     for key in sorted(set(env) | set(entry["env"])):
         if key not in entry["env"]:
             environment[key] = "extra"
-        elif env.get(key) != entry["env"][key]:
-            environment[key] = "different" if key in env else "missing"
+        elif key not in env:
+            environment[key] = "missing"
+        elif key == "TELELOOM_DATA_DIR":
+            environment[key] = (
+                "identical" if _same_path(env[key], entry["env"][key]) else "different"
+            )
         else:
-            environment[key] = "identical"
+            environment[key] = "identical" if env[key] == entry["env"][key] else "different"
     blocking.extend(
         f"{env_key}.{key} {state}"
         for key, state in environment.items()
@@ -249,8 +268,8 @@ def _entry_diff(client: str, entry: dict[str, Any], saved: Any) -> dict[str, Any
         blocking.append("disabled entry")
     return {
         "state": "different" if blocking else "identical",
-        "command": "identical" if current == entry["command"] else "different",
-        "args": "identical" if current_args == entry["args"] else "different",
+        "command": "identical" if same_command else "different",
+        "args": "identical" if same_args else "different",
         "environment": environment,
         "preserved": sorted(set(saved) - {"command", "args", env_key, "type"}),
         "blocking": blocking,
@@ -279,7 +298,7 @@ def _existing(client: str, entry: dict[str, Any]) -> dict[str, Any]:
             fingerprint.update(path.read_bytes())
         except OSError:
             fingerprint.update(b"<unreadable>")
-    diffs = [_entry_diff(client, entry, saved) for saved in entries]
+    diffs = [entry_diff(client, entry, saved) for saved in entries]
     existing_diff = next((item for item in diffs if item["blocking"]), diffs[0] if diffs else None)
     public: dict[str, Any] = {
         "state": "present" if entries else "absent",
